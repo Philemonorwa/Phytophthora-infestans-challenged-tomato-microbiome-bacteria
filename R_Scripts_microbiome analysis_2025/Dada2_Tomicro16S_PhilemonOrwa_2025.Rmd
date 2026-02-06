@@ -1,0 +1,201 @@
+---
+title: "Dada2_Philemon"
+output: html_document
+date: "2025-02-08"
+---
+
+Load packages
+```{r}
+#BiocManager::install("dada2")
+install.packages("BiocManager")  # Install if not already installed
+BiocManager::install("dada2")
+
+# Load dada2 package
+library(dada2)
+
+library(dada2); packageVersion("dada2")
+library(ShortRead); packageVersion("ShortRead")
+library(ggplot2); packageVersion("ggplot2")
+```
+Load data
+```{r}
+path <- "~/Tomicro_2025/Foward_reads"
+
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq.gz", full.names = TRUE))
+fnFs
+
+path2 <- "~/Tomicro_2025/Reverse_reads"
+fnRs <- list.files(path2)
+
+fnRs <- sort(list.files(path2, pattern="_R2_001.fastq.gz", full.names = TRUE))
+fnRs
+
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+sample.names <- sapply(strsplit(basename(fnRs), "_"), `[`, 1)
+```
+
+```{r}
+# Quality Profile of Reads (optional but useful)
+plotQualityProfile(fnFs[1:4])
+plotQualityProfile(fnFs[5:8])
+plotQualityProfile(fnFs[9:12])
+plotQualityProfile(fnFs[13:16])
+plotQualityProfile(fnFs[17:20])
+plotQualityProfile(fnFs[21:24])
+plotQualityProfile(fnFs[25:28])
+plotQualityProfile(fnFs[29:32])
+plotQualityProfile(fnFs[33:36])
+plotQualityProfile(fnFs[37:40])
+plotQualityProfile(fnFs[41:44])
+plotQualityProfile(fnFs[45:48])
+
+
+```
+```{r}
+
+# Quality Profile of Reads (optional but useful)
+plotQualityProfile(fnRs[1:4])
+plotQualityProfile(fnRs[5:8])
+plotQualityProfile(fnRs[9:12])
+plotQualityProfile(fnRs[13:16])
+plotQualityProfile(fnRs[17:20])
+plotQualityProfile(fnRs[21:24])
+plotQualityProfile(fnRs[25:28])
+plotQualityProfile(fnRs[29:32])
+plotQualityProfile(fnRs[33:36])
+plotQualityProfile(fnRs[37:40])
+plotQualityProfile(fnRs[41:44])
+plotQualityProfile(fnRs[45:48])
+
+
+```
+
+Filter and Trim
+```{r}
+
+path3 <- "~/Tomicro_2025"
+filtFs <- file.path(path3, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path3, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, trimRight=c(10,100),
+                     rm.phix=TRUE,maxEE=c(2,2),matchIDs=TRUE,
+                     compress=TRUE, multithread=TRUE)
+
+out2 <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,160),
+                     maxN=0, rm.phix=TRUE,maxEE=c(2,2),matchIDs=TRUE,
+                     compress=TRUE, multithread=TRUE)
+head(out)
+head(out2)
+
+```
+Errorlearning
+
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+```
+```{r}
+plotErrors(errF, nominalQ=TRUE)
+```
+
+```{r}
+plotErrors(errR, nominalQ=TRUE)
+```
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE) 
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+#dadaFs[[1]]
+#dadaRs[[1]]
+```
+
+
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, minOverlap=12, maxMismatch= 0, verbose=TRUE)
+head(mergers[[4]])
+```
+
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+
+seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 270:290]
+dim(seqtab2)
+table(nchar(getSequences(seqtab2)))
+```
+
+Chimera removal
+
+```{r}
+seqtab2.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab2.nochim)
+sum(seqtab2.nochim)/sum(seqtab2)
+table(nchar(getSequences(seqtab2.nochim)))
+```
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, 
+               sapply(dadaFs, getN), 
+               sapply(dadaRs, getN), 
+               sapply(mergers, getN), 
+               rowSums(seqtab2),
+               rowSums(seqtab2.nochim)) #
+colnames(track) <- c("input", "filtered", "denoisedF", 
+                     "denoisedR", "merged", "lengthfilter", "nonchim") #"lengthfilter",
+rownames(track) <- sample.names
+track
+track[, 1:7] /track[, 1] * 100
+#table(nchar(getSequences(seqtab2.nochim)))
+write.table(track, "Quality_Ctr.txt")
+
+```
+Export files
+
+```{r}
+#ASv table
+seqtab2.nochim.t <- t(seqtab2.nochim) #samples=columns; species=rows
+write.csv(seqtab2.nochim.t, "ASVtable_16S_Tomicro_2025.csv")
+
+```
+Assign Taxonomy
+```{r}
+#assign taxonomy. here: SILVA Version138
+taxa <- assignTaxonomy(seqtab2.nochim, "silva_nr99_v138.1_train_set.fa.gz", multithread=TRUE) #default: bootstrap 50; alternative databases: RDP, Greengenes
+
+head(taxa)
+```
+Renaming ASVs
+
+```{r}
+#Note that the ASVs are named by their sequence. It is easier if the ASVs have shorter names, and the sequences are therefore usually run through a hash algorithm to give them unique shorter reproducible names.
+# Extract sequences (to save them)
+seqs <- Biostrings::DNAStringSet(getSequences(seqtab2.nochim))
+head(seqs)
+
+# New names
+install.packages("openssl")
+library("openssl")
+asv_new <- openssl::md5(getSequences(seqtab2.nochim))
+
+# Put in the new names for all objects
+colnames(seqtab2.nochim) <- asv_new
+names(seqs) <- asv_new
+rownames(taxa) <- asv_new
+```
+Export
+
+```{r}
+taxa[1:3, ]
+seqtab2.nochim.t <- t(seqtab2.nochim) #samples=columns; species=rows
+write.csv(seqtab2.nochim.t, "ASVtable2_16S_Tomicro_2025.csv")
+write.csv(taxa, "taxa_16S_Tomicro_2025.csv")
+write.csv(seqs, "ASVsequences_16S_Tomicro_2025.csv")
+```
+
+
+
+

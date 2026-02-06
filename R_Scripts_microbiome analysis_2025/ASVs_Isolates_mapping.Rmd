@@ -1,0 +1,233 @@
+---
+title: "ASVS vs Isolates"
+author: "Philemon"
+date: "2025-11-07"
+output: html_document
+---
+
+```{r}
+library(readxl)   # Needed to read .xlsx files
+library(dplyr)
+library(stringr)
+library(tidyr)
+#install.packages("igraph")
+library(igraph)
+#install.packages("ggraph")
+library(ggraph)
+library(ggplot2)
+library(tidygraph)
+library(tibble)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+```
+
+```{r}
+ASV_Isolate_Mapping <- read_excel(
+  "~/Tomicro_2025/ASVs_vs_isolates/Isolate_ASV_mapping.xlsx",
+  sheet = "Sheet1"
+)
+
+ASVs <- read.table(
+  "~/Tomicro_2025/16S_Tomicro_2025_Rarefied_Table_1000_times_Clean_ASVnumbers_2.txt",
+  header = TRUE, sep = "\t", check.names = FALSE
+)
+
+metadata <- read.table(
+  "~/Tomicro_2025/Metadata_12_2025.txt",
+  header = TRUE, sep = "\t", check.names = FALSE
+)
+
+```
+```{r}
+# Mapping: keep only needed columns and drop duplicates
+map <- ASV_Isolate_Mapping %>%
+  rename_with(~str_replace_all(.x, "\\s+", "")) %>%
+  # EDIT HERE if your column names differ
+  rename(Isolate_ID = Isolate_ID, ASV_ID = ASV_ID, Genus = Genus) %>%
+  mutate(
+    Isolate_ID = trimws(as.character(Isolate_ID)),
+    ASV_ID     = trimws(as.character(ASV_ID)),
+    Genus      = trimws(as.character(Genus))
+  ) %>%
+  distinct(Isolate_ID, ASV_ID, Genus)
+```
+
+```{r}
+# If your ASV table already has Sample as first column, keep it.
+if (!"Sample" %in% colnames(ASVs)) {
+  ASVs <- ASVs %>% rownames_to_column("Sample")
+}
+  ASVs <- ASVs %>% mutate(Sample = as.character(Sample))
+  
+```
+```{r}
+meta <- metadata %>%
+  mutate(
+    Sample           = as.character(Sample),
+    Microcompartment = as.character(Microcompartment),
+    Soil_origin      = as.character(Soil_origin),
+    Plant_condition  = as.character(Plant_condition),
+    Group = paste(Microcompartment, Soil_origin, Plant_condition, sep = "_")
+  ) %>%
+  select(Sample, Microcompartment, Soil_origin, Plant_condition, Group)
+
+```
+```{r}
+# 3) ALIGN SAMPLES BETWEEN ASV TABLE AND METADATA
+# ----------------------------
+common_samples <- intersect(ASVs$Sample, meta$Sample)
+if (length(common_samples) < 2) stop("Too few overlapping samples between ASVs and metadata.")
+
+ASVs2 <- ASVs %>% filter(Sample %in% common_samples)
+meta2 <- meta %>% filter(Sample %in% common_samples)
+
+# ----------------------------
+# 4) IDENTIFY ASV COLUMNS + CHECK MATCH WITH MAPPING
+# ----------------------------
+asv_cols <- grep("^ASV", colnames(ASVs2), value = TRUE)
+if (length(asv_cols) == 0) stop("No ASV columns detected (expected colnames like ASV11, ASV235, ...).")
+
+matched_asvs <- unique(map$ASV_ID)
+overlap_asvs <- intersect(asv_cols, matched_asvs)
+
+cat("ASV columns in table:", length(asv_cols), "\n")
+cat("ASVs in mapping:", length(matched_asvs), "\n")
+cat("Overlap:", length(overlap_asvs), "\n")
+
+if (length(overlap_asvs) == 0) stop("No overlap between mapping ASVs and ASV table column names.")
+
+# ----------------------------
+# 5) CONVERT RAREFIED COUNTS -> RELATIVE ABUNDANCE (%)
+# ----------------------------
+ASVs_RA <- ASVs2 %>%
+  mutate(total = rowSums(across(all_of(asv_cols)), na.rm = TRUE)) %>%
+  mutate(across(all_of(asv_cols), ~ 100 * .x / total)) %>%
+  select(-total)
+
+# ----------------------------
+# 6) LONG FORMAT + GROUP JOIN
+# ----------------------------
+asv_long <- ASVs_RA %>%
+  pivot_longer(cols = all_of(asv_cols), names_to = "ASV_ID", values_to = "RA") %>%
+  mutate(ASV_ID = trimws(as.character(ASV_ID))) %>%
+  left_join(meta2 %>% select(Sample, Group), by = "Sample")
+
+# Sanity: ensure group exists
+if (all(is.na(asv_long$Group))) stop("Group join failed: Sample IDs do not match between ASVs_RA and meta2.")
+
+# ----------------------------
+# 7) MEAN RA PER ASV PER GROUP (only matched ASVs)
+# ----------------------------
+asv_group_mean <- asv_long %>%
+  filter(ASV_ID %in% overlap_asvs) %>%
+  group_by(ASV_ID, Group) %>%
+  summarise(mean_RA = mean(RA, na.rm = TRUE), .groups = "drop")
+
+if (nrow(asv_group_mean) == 0) stop("No rows in asv_group_mean. Something is wrong with ASV filtering.")
+
+# ----------------------------
+# 8) AGGREGATE TO ISOLATE LEVEL (sum across its ASVs)
+# ----------------------------
+iso_group_mean <- map %>%
+  filter(ASV_ID %in% overlap_asvs) %>%
+  left_join(asv_group_mean, by = "ASV_ID") %>%
+  group_by(Isolate_ID, Genus, Group) %>%
+  summarise(mean_RA = sum(mean_RA, na.rm = TRUE), .groups = "drop")
+
+# ----------------------------
+# 9) MATRIX FOR HEATMAP (rows = isolates, cols = groups)
+# ----------------------------
+mat_df <- iso_group_mean %>%
+  pivot_wider(names_from = Group, values_from = mean_RA, values_fill = 0)
+
+mat <- mat_df %>% select(-Isolate_ID, -Genus) %>% as.matrix()
+rownames(mat) <- mat_df$Isolate_ID
+
+# Check variation (prevents colorRamp2 error)
+rng <- range(mat, finite = TRUE)
+if (rng[1] == rng[2]) {
+  stop("Heatmap matrix has no variation (all values identical). Check earlier steps; likely zero signal after filtering.")
+}
+
+# ----------------------------
+# 10) ROW ANNOTATIONS (Genus + number of ASVs per isolate)
+# ----------------------------
+n_asv <- map %>% filter(ASV_ID %in% overlap_asvs) %>% count(Isolate_ID, name = "n_ASVs")#Counts how many ASVs map to each isolate
+
+row_anno <- mat_df %>%#Creates a table with one row per isolate:
+  select(Isolate_ID, Genus) %>%
+  left_join(n_asv, by = "Isolate_ID") %>%
+  distinct()
+
+ha <- rowAnnotation(
+  Genus = row_anno$Genus,
+  annotation_name_side = "top"
+)
+
+# ----------------------------
+# 11) COLORS + HEATMAP
+# ----------------------------
+col_fun <- colorRamp2(
+  breaks = c(rng[1], (rng[1] + rng[2]) / 2, rng[2]),
+  colors = c("#deebf7", "#9ecae1", "#08519c")
+)
+
+library(vegan)
+
+ht <- Heatmap(
+  mat,
+  name = "Mean relative abundance (%)",
+  col = col_fun,
+  cluster_rows = TRUE,
+  clustering_distance_rows = function(x) vegan::vegdist(x, method = "bray"),
+  cluster_columns = FALSE,
+  column_names_rot = 37,
+  row_names_gp = gpar(fontsize = 10),
+  row_names_max_width = unit(4, "cm"),
+  column_names_gp = gpar(fontsize = 10),
+  heatmap_legend_param = list(
+    title = "Mean relative abundance (%)",
+    title_position = "leftcenter-rot"   
+  ),
+  rect_gp = grid::gpar(col = "grey85", lwd = 0.2),
+   width = unit(12, "cm")  # ← faint grid lines
+)
+
+pdf("~/Tomicro_2025/ASVs_vs_isolates/heatmap_isolates_mean_RA.pdf",
+    width = 12, height = 6)
+
+draw(
+  ht,
+  heatmap_legend_side = "left"
+)
+
+dev.off()
+#Colors represent mean relative abundance (%), calculated from rarefied counts and averaged across samples within each compartment × soil × health-status group. The color scale reflects the observed range of values (0–5 %).
+ 
+ #save as png
+  png(
+  "heatmap_isolates_mean_RA.png",
+  width = 10,
+  height = 6,
+  units = "in",
+  res = 300
+)
+
+draw(
+  ht,
+  heatmap_legend_side = "left"
+)
+
+dev.off()
+  
+  
+  
+  
+  
+```
+```{r}
+# ----------------------------
+
+```
+

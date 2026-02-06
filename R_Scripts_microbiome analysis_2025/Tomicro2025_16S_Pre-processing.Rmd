@@ -1,0 +1,220 @@
+---
+title: "Tomicro2025_16S_Pre-processing"
+author: "Philemon Orwa"
+date: "2025-02-11"
+output: html_document
+---
+
+```{r}
+library(ggplot2) #ggplot2: Fancy graphs
+library(ggpubr) #ggplot expansion for more fancy graphs
+library(readxl)
+library(readr)
+library(dplyr)# Data handling
+library(vegan)# Multivariate stat tool
+library(tidyr) # Data handling
+library(RColorBrewer) # Colours for fancy graphs
+library(tibble)# Data handling: rownames/columnanmes
+#install.packages("phyloseq")
+#library(phyloseq) # tool for 16S amplicon analysis
+library(lme4) # mixed effect models 
+library(forcats)
+library(tidyverse)
+library(tibble)
+
+```
+
+Read data
+```{r}
+ASVs <- read.csv("~/Tomicro_2025/ASVtable2_16S_Tomicro_2025.csv", header = TRUE)
+#add manually in textfile a 0 in front of single numbers 1, 2, 3, 4 ,5 ...
+head(ASVs)
+dim(ASVs)
+
+tax <- read.csv("~/Tomicro_2025/taxa_16S_Tomicro_2025.csv", header = TRUE) 
+head(tax)
+dim(tax)
+
+```
+
+```{r}
+
+# Assign human-friendly ASV IDs
+ASVs <- ASVs %>%
+  mutate(ASVid = paste0("ASV", row_number()))
+
+tax <- tax %>%
+  mutate(ASVid = paste0("ASV", row_number()))
+
+# Merge ASV abundance table with taxonomy using ASVid
+tax_ASV <- inner_join(ASVs, tax, by = "ASVid")
+
+# View structure
+glimpse(tax_ASV)
+
+write.csv(tax_ASV, "tax_ASV_16S_Tomicro_2025.csv")
+
+tax_ASV <- tax_ASV %>%
+    select(-X.x, -X.y)  # Remove unnecessary columns
+
+tax_ASV <- tax_ASV %>%
+  relocate(ASVid, .before = everything())  # Moves ASVid to the first column
+head(tax_ASV)
+dim(tax_ASV)
+
+tax_ASV_filt <- tax_ASV %>%
+  filter(Kingdom == "Bacteria") %>%  # Step 1: Keep only Bacteria
+  filter(!str_detect(Order, "Mitochondria|Chloroplast")) %>%  # Step 2: Remove rows where Order contains "Mitochondria" or "Chloroplast"
+  filter(!str_detect(Family, "Mitochondria|Chloroplast"))  # Step 3: Remove rows where Family contains "Mitochondria" or "Chloroplast"
+
+head(tax_ASV_filt)
+dim(tax_ASV_filt)
+
+write.csv(tax_ASV_filt, "tax_ASV_fil_16S_Tomicro_2025.csv")
+
+# Check if filtering worked
+unique(tax_ASV$Kingdom)  # Before filtering
+unique(tax_ASV_filt$Kingdom)  # After filtering
+
+colnames(tax_ASV_filt)
+
+sum(duplicated(tax_ASV_filt$ASVid)) 
+
+ASV_subset <- tax_ASV_filt[,c(1:49)]
+dim(ASV_subset)
+head(ASV_subset)
+
+rownames(ASV_subset) <- ASV_subset[, 1]
+ASV_subset <- ASV_subset[, -1]
+
+head(ASV_subset)
+
+
+
+
+# Identify the last sample column (before Kingdom appears)
+num_sample_cols <- which(colnames(tax_ASV_filt) == "Kingdom") - 1
+
+# Subset only the ASV abundance data
+ASV_subset <- tax_ASV_filt[, c(2:num_sample_cols)]  # Excludes ASVid and taxonomy
+dim(ASV_subset)
+head(ASV_subset)
+write.csv(ASV_subset, "ASV_subset_fil_16S_Tomicro_2025.csv")
+
+sum(duplicated(ASV_subset[, 1]))  # Count duplicates
+unique(ASV_subset[, 1])  # View unique values
+
+ASV_subset
+
+rownames(ASV_subset) <- ASV_subset[, 1]  # Set ASVid as rownames
+ASV_subset <- ASV_subset[, -1]  # Remove ASVid column
+
+# Ensure samples are sorted alphabetically
+ASV_subset <- ASV_subset[, order(names(ASV_subset))]
+
+# View final dataset
+View(ASV_subset)
+
+ASV_subset <- ASV_subset[ , order(names(ASV_subset))]
+View(ASV_subset)
+
+ASVs_clean <- ASV_subset[-which(rowSums(ASV_subset[sapply(ASV_subset, is.numeric)]) <= 5), ]
+dim(ASVs_clean)
+head(ASVs_clean)
+
+#Exclude ASVs with all 0 in one row
+ASVs_no0 <- ASVs_clean[rowSums(ASVs_clean[, -1] > 0) != 0, ]
+dim(ASVs_no0)
+head(ASVs_no0)
+View(ASVs_no0)
+
+
+#Export
+write.table(ASVs_no0, "~/Tomicro_2025/ASV_table_16S_Tomicro_2025_no0_ASVNumbers_2.txt", dec = ".", sep = "\t")
+
+#Clean taxonomy dataset
+# Convert row names to a column 
+ASVs_no0_2 <- ASVs_no0 %>%
+  rownames_to_column(var = "rowname")
+head(ASVs_no0_2)
+dim(ASVs_no0_2)
+View(ASVs_no0_2)
+
+#change name of first column
+colnames(tax_ASV_filt)[1] <- "rowname"
+head(tax_ASV_filt)
+View(tax_ASV_filt)
+#select columns in taxonomy
+rowname <- tax_ASV_filt[, 1]
+last_col <- tax_ASV_filt[, (ncol(tax_ASV_filt)-5):ncol(tax_ASV_filt)]
+tax_new <- cbind(rowname, last_col)
+head(tax_new)
+dim(tax_new)
+
+
+#join datasets
+tax_clean <- inner_join(ASVs_no0_2, tax_new, by="rowname")
+dim(tax_clean)
+View(tax_clean)
+
+#select taxonomy columns
+ASVid <- tax_clean[, 1]
+last_cols <- tax_clean[, (ncol(tax_clean)-5):ncol(tax_clean)]
+tax_final <- cbind(ASVid, last_cols)
+dim(tax_final)
+head(tax_final)
+View(tax_final)
+#Export
+write.table(tax_final, "~/Tomicro_2025/16S_Tomicro_2025_Table_SILVAtaxonomy_CLEAN_2.txt", dec = ".", sep = "\t")
+
+
+```
+
+#Create rarefied dataset
+Read data
+```{r}
+ASVs_no0_new <- read.table("~/Tomicro_2025/ASV_table_16S_Tomicro_2025_no0_ASVNumbers_2.txt", header=T, sep="\t", dec=".", fill=FALSE) 
+head(ASVs_no0_new)
+dim(ASVs_no0_new)
+```
+
+transpose data
+```{r}
+#transpose data
+tASVs<- t(ASVs_no0_new) # samples in rows
+dim(tASVs)
+head(tASVs)
+str(tASVs)
+View(tASVs)
+```
+
+Visualization of rarefaction curve 1000 random rarefactions
+```{r}
+library(vegan)
+myrare <- rarecurve(tASVs, step = 1000, cex=0.4)
+```
+
+get min rowSum 
+```{r}
+rowASVs <- rowSums(tASVs)
+min(rowASVs)
+```
+
+creating 1000x rarefied table for further analysis of alpha-diversity
+```{r}
+Have_you_Runned_previously_RF<-"NO"
+if (Have_you_Runned_previously_RF=="NO"){
+  list_of_1000_rarefaction=lapply(1:1000, function(i){ rrarefy(tASVs, 14866)})
+}
+
+mean.dat <- as.data.frame(apply(simplify2array(lapply(list_of_1000_rarefaction, as.matrix)),1:2,mean))
+View(mean.dat)
+dim(mean.dat)
+
+write.table(mean.dat, file="~/Tomicro_2025/16S_Tomicro_2025_Rarefied_Table_1000_times_Clean_ASVnumbers_2.txt", sep = "\t")
+
+```
+To account for uneven sequencing depth, we repeatedly performed 1000 rarefactions to our dataset’s lowest number of sequences. Average ASV abundances were calculated based on the 1000 rarefactions.
+
+
+

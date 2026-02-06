@@ -1,0 +1,148 @@
+---
+title: "Beta-diversity of Tomato Microbiome"
+author: "Lim"
+date: "2025-05-12"
+output: html_document
+---
+
+```{r load-packages, include=FALSE}
+# Load required packages
+library(vegan)
+library(knitr)
+```
+
+## Load and Explore ASV Table
+
+```{r load-data}
+ASVs <- read.table("16S_Tomicro_2025_Rarefied_Table_1000_times_Clean_ASVnumbers_2.txt",
+                   header = TRUE, sep = "\t", dec = ".", fill = FALSE)
+
+# Replace NA with 0
+ASVs[is.na(ASVs)] <- 0
+
+# Preview ASV table
+head(ASVs)
+dim(ASVs)
+```
+
+## Calculate Relative Abundance
+
+```{r relabund}
+# Convert to % relative abundance
+ASVs_rela <- sweep(ASVs, 1, rowSums(ASVs), FUN = "/") * 100
+```
+
+## Load and Clean Metadata
+
+```{r metadata}
+metadat <- read.table("Metadata_02_2025.txt", header = TRUE, row.names = 2, sep = "\t", quote = "\"")
+
+# Clean whitespace and convert to factors
+metadat$Plant.condition   <- factor(trimws(metadat$Plant.condition))
+metadat$Soil.origin       <- factor(trimws(metadat$Soil.origin))
+metadat$Microcompartment <- factor(trimws(metadat$Microcompartment))
+metadat$Replicate         <- factor(trimws(metadat$Replicate))
+
+View(metadat)
+table(metadat$Plant.condition, metadat$Microcompartment, metadat$Soil.origin)
+```
+
+## Match Metadata with ASV Table
+
+```{r align-samples}
+# Filter out samples with zero abundance
+non_empty <- rowSums(ASVs_rela) > 0
+ASVs_rela <- ASVs_rela[non_empty, ]
+metadat   <- metadat[rownames(metadat) %in% rownames(ASVs_rela), ]
+ASVs_rela <- ASVs_rela[rownames(metadat), ]
+
+# Confirm rownames match
+stopifnot(identical(rownames(ASVs_rela), rownames(metadat)))
+```
+
+## Bray-Curtis Distance Matrix
+
+```{r distance}
+ASVs_rela_dist <- vegdist(ASVs_rela, method = "bray")
+stopifnot(!any(is.na(ASVs_rela_dist)))
+```
+
+## PERMANOVA
+
+```{r permanova}
+adonis_result <- adonis2(
+  ASVs_rela_dist ~ Plant.condition * Microcompartment * Soil.origin,
+  data = metadat,
+  permutations = 9999,
+  by = "term"
+)
+adonis_result
+```
+
+## NMDS Ordination
+
+```{r nmds}
+NMDS_ASVs <- metaMDS(ASVs_rela_dist, distance = "bray", k = 2, try = 20, trymax = 100, trace = TRUE)
+NMDS_ASVs
+```
+
+## NMDS Plot
+
+```{r nmds-plot}
+# Assign point shapes by Plant.condition
+pch_vals <- ifelse(metadat$Plant.condition == "Healthy", 21, 24)
+
+# Assign fill colors by Microcompartment and Soil.origin
+color_map <- with(metadat, interaction(Microcompartment, Soil.origin))
+palette <- c(
+  "Rhizosphere.SoilA" = "#146eb4",
+  "Rhizosphere.SoilB" = "#ff9900",
+  "Phyllosphere.SoilA" = "#18D41B",
+  "Phyllosphere.SoilB" = "#D4B518",
+  "Endosphere.SoilA" = "#D418B5",
+  "Endosphere.SoilB" = "#971C1C"
+)
+bg_vals <- palette[as.character(color_map)]
+
+# Generate NMDS plot
+plot(NMDS_ASVs, type = "n", display = "sites", choices = c(1, 2),
+     xlim = c(-3, 3.5), ylim = c(-1.5, 1.5), bty = 'o', yaxt = "n")
+axis(2, at = seq(-1.5, 1.5, by = 0.5), las = 1)
+
+points(NMDS_ASVs, display = "sites", pch = pch_vals, bg = bg_vals)
+
+legend("bottomleft", inset = c(0,0), xpd = TRUE, text.font = 1.5,
+       legend = c("Rhizosphere SoilA", "Rhizosphere SoilB", "Phyllosphere SoilA",
+                  "Phyllosphere SoilB", "Endosphere SoilA", "Endosphere SoilB"),
+       col = "black", pt.bg = unname(palette),
+       pch = c(21, 21, 21, 21, 21, 21), cex = 0.7, bty = "n")
+
+legend("topleft", inset = c(0,0), xpd = TRUE, text.font = 1.5,
+       legend = c("Healthy", "Diseased"),
+       pch = c(21, 24), cex = 0.7, bty = "n")
+
+#ordipointlabel(NMDS_ASVs, "sites", add = TRUE, cex = 0.6)
+```
+
+## Save the Plot
+
+```{r save-plot}
+png("output.png", width = 7, height = 7, units = "in", res = 300)
+
+# Repeat plotting for export
+plot(NMDS_ASVs, type = "n", display = "sites", choices = c(1, 2),
+     xlim = c(-3, 3.5), ylim = c(-1.5, 1.5), bty = 'o', yaxt = "n")
+axis(2, at = seq(-1.5, 1.5, by = 0.5), las = 1)
+points(NMDS_ASVs, display = "sites", pch = pch_vals, bg = bg_vals)
+legend("bottomleft", inset = c(0,0), xpd = TRUE, text.font = 1.5,
+       legend = c("Rhizosphere SoilA", "Rhizosphere SoilB", "Phyllosphere SoilA",
+                  "Phyllosphere SoilB", "Endosphere SoilA", "Endosphere SoilB"),
+       col = "black", pt.bg = unname(palette),
+       pch = c(21, 21, 21, 21, 21, 21), cex = 0.7, bty = "n")
+legend("topleft", inset = c(0,0), xpd = TRUE, text.font = 1.5,
+       legend = c("Healthy", "Diseased"),
+       pch = c(21, 24), cex = 0.7, bty = "n")
+ordipointlabel(NMDS_ASVs, "sites", add = TRUE, cex = 0.6)
+
+dev.off()
+```

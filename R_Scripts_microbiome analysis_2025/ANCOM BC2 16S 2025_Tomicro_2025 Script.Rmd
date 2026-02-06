@@ -1,0 +1,304 @@
+---
+title: "ANCOM BC2 16S 2025"
+author: "Philemon"
+date: "2025-05-16"
+output: html_document
+---
+
+```{r}
+getwd()
+setwd("~/Tomicro_2025/ANCOM_BC2")
+#setwd("H:/")
+
+```
+
+```{r}
+#if (!requireNamespace("BiocManager", quietly = TRUE))install.packages("BiocManager")
+#BiocManager::install("ANCOMBC")
+library(ANCOMBC)
+#BiocManager::install("phyloseq")
+library(phyloseq)
+library(tibble)
+#BiocManager::install("microbiome")
+library(microbiome)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(lme4)
+#install.packages("DT")
+library(DT)
+```
+
+load data
+
+```{r}
+# Load ASV tables
+ASVs <- read.table("~/Tomicro_2025/ASV_table_16S_Tomicro_2025_no0_ASVNumbers_2.txt", header = TRUE, sep="\t")
+ASV2 <- read.table("~/Tomicro_2025/16S_Tomicro_2025_Rarefied_Table_1000_times_Clean_ASVnumbers_2.txt", header = TRUE, sep="\t")
+ASV2 <- t(ASV2)  # transpose rarefied table
+
+# Load taxonomy
+tax <- read.table("~/Tomicro_2025/16S_Tomicro_2025_Table_SILVAtaxonomy_CLEAN_2.txt", header = TRUE, sep="\t")
+rownames(tax) <- tax[, 1]
+tax <- tax[, -1]
+
+# Load metadata
+metadata <- read.table("~/Tomicro_2025/Metadata_02_2025.txt", header = TRUE, sep = "\t")
+#colnames(metadata)[colnames(metadata) == "Plant condition"] <- "Plant.condition"
+#colnames(metadata)[colnames(metadata) == "Soil origin"] <- "Soil.origin"
+metadata$Plant.condition <- factor(trimws(metadata$Plant.condition))
+metadata$Soil.origin <- factor(trimws(metadata$Soil.origin))
+metadata$Microcompartment <- factor(trimws(metadata$Microcompartment))
+metadata$Replicate <- factor(trimws(metadata$Replicate))
+rownames(metadata) <- NULL
+metadata <- metadata %>% column_to_rownames("ID")
+
+
+```
+
+Create Phyloseq-Object with rarefied data (nach Schloss 2024)
+
+```{r}
+
+# Create phyloseq components
+ASVs_mat <- as.matrix(ASV2)
+tax_mat <- as.matrix(tax)
+
+ASV <- otu_table(ASVs_mat, taxa_are_rows = TRUE)
+TAX <- tax_table(tax_mat)
+samples <- sample_data(metadata)
+
+Tomicro <- phyloseq(ASV, TAX, samples)
+Tomicro
+
+```
+
+```{r}
+
+# Convert to TreeSummarizedExperiment
+Tomicro_tse <- mia::makeTreeSummarizedExperimentFromPhyloseq(Tomicro)
+print(Tomicro_tse)
+
+
+# Convert to factors (for modeling)
+colData(Tomicro_tse)$Microcompartment <- factor(colData(Tomicro_tse)$Microcompartment)
+colData(Tomicro_tse)$Soil.origin <- factor(colData(Tomicro_tse)$Soil.origin)
+colData(Tomicro_tse)$Plant.condition <- factor(colData(Tomicro_tse)$Plant.condition)
+
+# Confirm metadata variables
+colnames(colData(Tomicro_tse))
+
+# Build safe formula
+fix_formula_str <- paste("Microcompartment", "Soil.origin", "Plant.condition", sep = " + ")
+fix_formula <- as.formula(paste("~", fix_formula_str))
+
+# Check that all formula variables are present in metadata
+all.vars(fix_formula) %in% colnames(colData(Tomicro_tse))
+
+
+
+```
+
+<https://www.bioconductor.org/packages/release/bioc/vignettes/ANCOMBC/inst/doc/ANCOMBC2.html> <https://bioconductor.org/packages/release/bioc/manuals/ANCOMBC/man/ANCOMBC.pdf>
+
+```{r}
+
+##test
+#assay(Tomicro_tse, "counts")[1:5, 1:5]
+#dim(assay(Tomicro_tse, "counts"))
+#all(colnames(assay(Tomicro_tse, "counts")) == rownames(colData(Tomicro_tse)))
+
+library(mia)      # Provides addTaxonomyTreeRanks()
+library(ANCOMBC) 
+library(TreeSummarizedExperiment)
+rowData(Tomicro_tse)
+rowData(Tomicro_tse)$ASV <- rownames(Tomicro_tse)#rename first column as ASV column only at ASV level
+
+set.seed(1310)
+fix_formula <- "Microcompartment + Soil.origin + Plant.condition"
+output <- ancombc2(
+  data = Tomicro_tse,
+  assay_name = "counts",
+  tax_level = NULL, # <-- analyze each row (ASV) as-is
+  fix_formula = fix_formula,
+  group = "Plant.condition",
+  p_adj_method = "hochberg",
+  alpha = 0.05,
+  n_cl = 2,
+  struc_zero = TRUE,
+  global = TRUE,
+  pairwise = TRUE,
+  dunnet = TRUE,
+  trend = FALSE,
+  rand_formula = NULL,
+  iter_control = list(tol = 1e-5, max_iter = 20, verbose = FALSE),
+  em_control = list(tol = 1e-5, max_iter = 100),
+  mdfdr_control = list(fwer_ctrl_method = "hochberg", B = 100),
+  trend_control = NULL
+)
+
+
+```
+
+```{r}
+#detection of structural zeros (taxon presence/absence) presence = FALSE, absence = TRUE
+#library(DT)
+#library(dplyr)  # or magrittr, for the %>% pipe
+
+tab_zero = output$zero_ind
+tab_zero %>%
+  datatable(caption = "The detection of structural zeros")
+View(tab_zero)
+#write.table(tab_zero, file = "~/Tomicro_2025/ANCOM_BC2/ASV/Tomicro_ANCOMBC2_All_zeros_PlantCondition_ASV.csv", append = FALSE, sep = " ", dec = ".", row.names = TRUE, col.names = TRUE)
+```
+
+```{r}
+#ANCOMBC primary result
+#Result from the ANCOM-BC log-linear model to determine taxa that are differentially abundant according to the covariate of interest. 
+#Angegeben ist immer der jeweilige Wert im Vergleich zur 1. Gruppe: Phyllo und Rhizo im Vgl zu Endo, Soil B im Vgl. zu Soil A, Healthy im Vgl. zu diseased
+#It contains: 
+#1) log fold changes (lfc); 
+#2) standard errors(se); 
+#3) test statistics(W); 
+#4) p-values(p); 
+#5) adjusted p-values(q); 
+#6) indicators whether the taxon is differentially abundant (TRUE) or not (FALSE) (diff).
+#7) if the taxon passed the sensitivity analysis (ss) when adding pseudo counts (= no change in significance independent of pseudocount addition = TRUE) 
+
+res_prim = output$res
+View(res_prim)
+#write.table(res_prim, file = "~/Tomicro_2025/ANCOM_BC2/Genus/Tomicro_ANCOMBC2_All_res_prim_Genus.csv", append = FALSE, sep = " ", dec = ".", row.names = TRUE, col.names = TRUE)
+```
+
+```{r}
+##ANCOM-BC2 global test of taxa with differential abundance across the “RU”, “HG”, and “EH” categories.
+res_global = output$res_global
+View(res_global)
+#write.table(res_global, file = "~/Tomicro_2025/ANCOM_BC2/Genus/Tomicro_ANCOMBC2_All_res_global_Genus_microcompartment
+#.csv", append = FALSE, sep = " ", dec = ".", row.names = TRUE, col.names = TRUE)
+```
+
+```{r}
+##ANCOM-BC2 multiple pairwise comparisons 
+##identify taxa that exhibit differential abundance between any two groups within a set of three or more experimental groups, all while maintaining control over the mdFDR.
+res_pair = output$res_pair
+View(res_pair)
+#write.table(res_pair, file = "~/Tomicro_2025/ANCOM_BC2/Genus/Tomicro_ANCOMBC2_All_res_microcompartment_pair_Genus.csv", append = FALSE, sep = " ", dec = ".", row.names = TRUE, col.names = TRUE)
+
+```
+
+```{r}
+##ANCOM-BC2 multiple pairwise comparisons against a pre-specified group (Dunnet's test) 
+#The Dunnett’s test is tailored for comparing multiple experimental groups against a control or reference group. ANCOM-BC2 Dunnett’s type of test applies this framework but also controls the mdFDR. 
+#It’s essential to highlight that ANCOM-BC2’s primary results control for multiple testing across taxa but not for multiple comparisons between groups. As such, unlike the ANCOM-BC2 Dunnett’s test, the primary output doesn’t control the mdFDR.
+res_dunn = output$res_dunn
+View(res_dunn)
+#write.table(res_dunn, file = "~/Tomicro_2025/ANCOM_BC2/Genus/Tomicro_ANCOMBC2_All_res_dunnet_microcompartment_Genus.csv", append = FALSE, sep = " ", dec = ".", row.names = TRUE, col.names = TRUE)
+
+
+```
+
+```{r}
+#ASv count per microcompartment
+counts <- assay(Tomicro_tse, "counts")
+meta <- colData(Tomicro_tse)
+presence_absence <- counts > 0
+
+# Convert to data frame
+sample_asv_counts <- data.frame(
+  Sample = colnames(counts),
+  Microcompartment = meta$Microcompartment,
+  ASV_Count = colSums(presence_absence)
+)
+
+# Summarize: total ASVs observed per Microcompartment
+summary_counts <- sample_asv_counts %>%
+  group_by(Microcompartment) %>%
+  summarise(
+    mean_ASVs = mean(ASV_Count),
+    median_ASVs = median(ASV_Count),
+    min_ASVs = min(ASV_Count),
+    max_ASVs = max(ASV_Count),
+    n_Samples = n()
+  )
+
+print(summary_counts)
+
+# Get Microcompartment vector
+group <- meta$Microcompartment
+
+# Make list to store unique ASVs per group
+asv_by_group <- split(seq_len(ncol(counts)), group)
+
+# Count how many ASVs are detected at least once in each Microcompartment
+asv_counts_per_group <- sapply(asv_by_group, function(sample_idx) {
+  sum(rowSums(counts[, sample_idx, drop = FALSE]) > 0)
+})
+
+asv_counts_per_group
+
+``
+#Subsets for compartments
+#Rhizo (6344 ASVs)
+Tomicro_Rhizo = subset_samples(Tomicro, Microcompartment == "Rhizosphere")
+sample_data(Tomicro_Rhizo)
+
+#filter for all 0 rows
+otu_table(Tomicro_Rhizo)
+ASV_df <- as.data.frame(otu_table(Tomicro_Rhizo))#Extract ASV table
+rows_to_keep <- rowSums(ASV_df) != 0# Find rows where all counts are zero
+filtered_ASV_df <- ASV_df[rows_to_keep, ]# Filter the OTU table
+filtered_ASV_mat <- as.matrix(filtered_ASV_df)# Convert back to a matrix if needed
+otu_table(Tomicro_Rhizo) <- otu_table(filtered_ASV_mat, taxa_are_rows = TRUE)
+otu_table(Tomicro_Rhizo)
+
+Tomicro_Rhizo_tse <- mia::makeTreeSummarizedExperimentFromPhyloseq(Tomicro_Rhizo)
+print(Tomicro_Rhizo_tse)
+```
+
+```{r}
+#run anbombc2 Rhizo
+set.seed(1810)
+rowData(Tomicro_Rhizo_tse )
+
+rowData(Tomicro_Rhizo_tse )$ASV <- rownames(Tomicro_Rhizo_tse )#rename first column as ASV column
+
+fix_formula <- "Soil.origin + Plant.condition"
+output = ancombc2(data = Tomicro_Rhizo_tse, assay_name = "counts", tax_level = NULL,
+                  fix_formula = fix_formula, 
+                  rand_formula = NULL,
+                  p_adj_method = "hochberg", 
+                  group = "Soil.origin", 
+                  alpha = 0.05, n_cl = 2, 
+                  struc_zero = TRUE,
+                  global = TRUE, pairwise = TRUE, 
+                  dunnet = TRUE, trend = FALSE,
+                  iter_control = list(tol = 1e-5, max_iter = 20, 
+                                      verbose = FALSE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  #lme_control = NULL, 
+                  mdfdr_control = list(fwer_ctrl_method = "hochberg", B = 100), 
+                  trend_control = NULL)
+
+output_rhizo<-output
+res_prim = output_rhizo$res
+View(res_prim)
+write.table(res_prim, file = "~/Tomicro_2025/ANCOM_BC2/Rhizophere/ASV_rhizo/Tomicro_Rhizo_ANCOMBC2_soil_origin_res_prim_ASV.csv", append = FALSE, sep = " ", dec = ".", row.names = TRUE, col.names = TRUE)
+
+#detection of structural zeros (taxon presence/absence) presence = FALSE, absence = TRUE
+tab_zero = output_rhizo$zero_ind
+tab_zero %>%
+  datatable(caption = "The detection of structural zeros")
+View(tab_zero)
+res_prim_zero <- full_join(tab_zero,res_prim,  by = "taxon")
+View(res_prim_zero)
+write.table(res_prim_zero, file = "~/Tomicro_2025/ANCOM_BC2/Rhizophere/ASV_rhizo/Tomicro_Rhizo_ANCOMBC2_soil_zeros_soil_origin_res_prim_ASV.csv", append = FALSE, sep = " ", dec = ".", row.names = TRUE, col.names = TRUE)
+```
+
+
+
+
+
+
+
+

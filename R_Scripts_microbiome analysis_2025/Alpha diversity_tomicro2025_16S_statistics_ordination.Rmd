@@ -1,0 +1,196 @@
+---
+title: "Tomicro2025_16S_statistics_ordination"
+author: "Philemon Orwa"
+date: "2025-02-14"
+output: html_document
+---
+
+### Analysis alpha-diversity with rarefied dataset
+Load data
+```{r}
+my_asv_table <- read.table("~/Tomicro_2025/16S_Tomicro_2025_Rarefied_Table_1000_times_Clean_ASVnumbers_2.txt", header=T, sep="\t", dec=".", fill=FALSE) #add manually in textfile a 0 in front of single numbers of samples 1, 2, 3, 4 ,5 ...
+head(my_asv_table)
+dim(my_asv_table)
+
+metadat <- read.table("~/Tomicro_2025/Metadata_02_2025.txt", header = TRUE, row.names = 2, sep = "\t", quote = "\"")
+View(metadat)
+colnames(metadat)  # Check for column names
+colnames(metadat) <- trimws(colnames(metadat))  # Remove spaces from column names
+metadat$Plant.condition <- factor(trimws(metadat$Plant.condition))  # Remove extra spaces
+metadat$Soil.origin <- factor(trimws(metadat$Soil.origin))  # Remove extra spaces
+metadat$Microcompartment <- factor(trimws(metadat$Microcompartment))  # Remove extra spaces
+metadat$Replicate <- factor(trimws(metadat$Replicate))  # Remove extra spaces
+
+stopifnot(identical(rownames(my_asv_table), rownames(metadat)))
+
+
+```
+
+Richness
+```{r}
+# Define function for richness
+Species.richness <- function(x) {
+  sum(x > 0.5)
+}
+
+alpha_divs <- metadat
+alpha_divs$richness <- apply(my_asv_table, 1, Species.richness)
+
+View(alpha_divs)
+
+#Fit ANOVA model (alpha-diversity)
+anova_model <- aov(
+  richness ~ Soil.origin * Plant.condition * Microcompartment,
+  data = alpha_divs
+)
+
+#Check ANOVA assumptionsp > 0.05 → residuals are approximately normal → ANOVA valid p ≤ 0.05 → normality violated → do NOT use ANOVA
+
+shapiro.test(residuals(anova_model))
+
+#Shapiro-Wilk normality test data:  residuals(anova_model) W = 0.95819, p-value = 0.08527
+
+qqnorm(residuals(anova_model))
+qqline(residuals(anova_model), col = "red")
+
+#Run ANOVA (assumptions are met)
+
+summary(anova_model)
+
+
+ggplot(alpha_divs, aes(y = richness, x = Soil.origin, col = Plant.condition)) +
+  geom_boxplot() +
+  facet_grid(~Microcompartment) +
+  stat_compare_means(method = "anova", label = "p.format")
+
+TukeyHSD(anova_model)
+TukeyHSD(anova_model, which = "Plant.condition")
+
+
+```
+
+Shannon index
+Shannon or Shannon–Weaver (or Shannon–Wiener) index is defined as H = -sum p_i log(b) p_i, where p_i is the proportional abundance of species i and b is the base of the logarithm. It is most popular to use natural logarithms, but some argue for base b = 2 (which makes sense, but no real difference).
+```{r}
+alpha_divs$shannon <-diversity(my_asv_table, index = "shannon", base = exp(1), MARGIN = 1)
+View(alpha_divs)
+
+#Fit ANOVA model (alpha-diversity)
+anova_model <- aov(
+  shannon ~ Soil.origin * Plant.condition * Microcompartment,
+  data = alpha_divs
+)
+
+
+qqnorm(residuals(anova_model))
+qqline(residuals(anova_model), col = "red")
+
+ggplot(data=alpha_divs, aes(y=shannon, x=Soil.origin, col = Plant.condition))+ geom_boxplot() + facet_grid(~Microcompartment) + stat_compare_means(method = "anova", label = "p.format")
+
+
+```
+
+Evenness
+```{r}
+diversity <- diversity(my_asv_table) #default=shannon
+speciesrichness <-specnumber(my_asv_table)
+alpha_divs$evenness<- diversity/log(speciesrichness)
+
+#Fit ANOVA model (alpha-diversity)
+anova_model <- aov(
+  evenness ~ Soil.origin * Plant.condition * Microcompartment,
+  data = alpha_divs
+)
+
+qqnorm(residuals(anova_model))
+qqline(residuals(anova_model), col = "red")
+
+
+ggplot(data=alpha_divs, aes(y=evenness, x=Soil.origin, col = Plant.condition))+ geom_boxplot() + facet_grid(~Microcompartment)+ stat_compare_means(method = "anova", label = "p.format")
+```
+
+Simpson index
+Both variants of Simpson's index are based on D = sum p_i^2. Choice simpson returns 1-D and invsimpson returns 1/D.
+```{r}
+alpha_divs$simpson <- diversity(my_asv_table, index = "simpson", base = exp(1), MARGIN = 1)
+
+anova_model <- aov(
+  simpson ~ Soil.origin * Plant.condition * Microcompartment,
+  data = alpha_divs
+)
+
+shapiro.test(residuals(anova_model))
+
+qqnorm(residuals(anova_model))
+qqline(residuals(anova_model), col = "red")
+
+
+
+ggplot(data=alpha_divs, aes(y=simpson, x=Soil.origin, col = Plant.condition))+ geom_boxplot() + facet_grid(~Microcompartment)+ stat_compare_means(method = "anova", label = "p.format")
+```
+
+#ANOVA/statistics on mean of diversity indices
+Behr et al. 2023: Significant differences in a-diversity (ASV Richness, Simpson, Shannon Index, and Evenness) were estimated with two-way ANOVA tests. If the data failed to fulfill the normality criteria based on the Shapiro test, the non-parametric aligned-rank ANOVA was performed (“ARTool” package, v.0.11.1, Kay et al., 2021).
+
+3-way-ANOVA Richness 
+```{r}
+library(car)
+library(rcompanion)
+
+model_1 <- aov(richness ~ Soil.origin*Plant.condition*Microcompartment, alpha_divs)
+anova(model_1) 
+qqnorm(residuals(model_1))
+leveneTest(model_1) 
+
+#run Tukey’s test for pairwise comparisons
+TukeyHSD(model_1)
+
+```
+
+```{r}
+model_2 <- aov(shannon ~ Soil.origin*Plant.condition*Microcompartment, alpha_divs)
+anova(model_2) 
+
+qqnorm(residuals(model_2))
+leveneTest(model_2) 
+
+#run Tukey’s test for pairwise comparisons
+TukeyHSD(model_2)
+
+
+```
+
+```{r}
+model_3 <- aov(simpson ~ Soil.origin*Plant.condition*Microcompartment, alpha_divs)
+anova(model_3) 
+
+qqnorm(residuals(model_3))
+leveneTest(model_3) 
+
+
+#run Tukey’s test for pairwise comparisons
+TukeyHSD(model_3)
+```
+
+```{r}
+model_4 <- aov(evenness ~ Soil.origin*Plant.condition*Microcompartment, alpha_divs)
+anova(model_4) 
+
+qqnorm(residuals(model_4))
+leveneTest(model_4) 
+
+#run Tukey’s test for pairwise comparisons
+TukeyHSD(model_4)
+```
+
+
+
+
+
+
+
+
+
+
+
+

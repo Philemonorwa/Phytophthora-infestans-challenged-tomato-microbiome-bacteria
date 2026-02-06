@@ -1,0 +1,144 @@
+---
+title: "Tomicro2025_16S_square_barplots"
+author: "Philemon"
+date: "2025-07-11"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(readxl)
+library(stringr)
+library(dplyr)
+library(ggtext) # we can change fonts in plots
+library(RColorBrewer)
+library(ggplot2)
+```
+Load clean datasets
+
+```{r}
+
+metadata <- read.table("~/Tomicro_2025/Metadata_02_2025.txt", header=T, sep="\t", dec=".") %>%
+  select(ID, Plant.condition, Microcompartment, Soil.origin, Compsoil, CompSoilDis) 
+View(metadata)
+
+#rarefied dataset (according to Schloss 2024)
+ASV_counts <- read.table("~/Tomicro_2025/16S_Tomicro_2025_Rarefied_Table_1000_times_Clean_ASVnumbers_2.txt", header=T, sep="\t", dec=".", fill=FALSE)#this file was cleaned for mitos, chloros and all taxa which are not bacteria, also it is a rarefied dataset
+dim(ASV_counts)
+View(ASV_counts)
+#change column name
+    ASV_counts <- as.data.frame(ASV_counts)
+    ASV_counts <- rownames_to_column(ASV_counts, var = "ID")
+    View(ASV_counts)
+#continue to long format
+    ASV_counts <- ASV_counts %>%
+    pivot_longer(-ID, names_to="ASV", values_to = "count")
+    View(ASV_counts)
+
+tax_ASV <- read.table("~/Tomicro_2025/16S_Tomicro_2025_Table_SILVAtaxonomy_CLEAN_2.txt", header=TRUE, sep="\t") 
+#rename column
+    colnames(tax_ASV)[which(names(tax_ASV) == "ASVid")] <- "ASV"
+
+View(tax_ASV)
+dim(tax_ASV)
+
+```
+Combine in one dataset
+```{r}
+ASV_relabu <- dplyr::inner_join(metadata, ASV_counts, by = "ID") %>%
+  dplyr::inner_join(., tax_ASV, by = "ASV") %>%
+  group_by(ID) %>% mutate(rel_abund = count / sum(count)) %>%
+  ungroup() %>%
+  select(-count) 
+
+ASV_relabu
+dim(ASV_relabu)
+
+#check if all values add up to 1
+ASV_relabu %>%
+  group_by(ID) %>%
+  summarize(total = sum(rel_abund))
+#check if everything apart from bacteria is out
+unique(ASV_relabu$Kingdom)
+```
+```{r}
+
+# Step 1: Filter full dataset to only Soil B + Rhizosphere
+ASV_relabu_filtered <- ASV_relabu %>%
+  filter(Microcompartment == "Rhizosphere",
+         Soil.origin == "SoilB",
+         Plant.condition %in% c("Healthy", "Diseased"))
+
+#long format
+
+ASV_relabu_long <- ASV_relabu_filtered %>%
+  pivot_longer(cols = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "ASV"),
+               names_to = "level",
+               values_to = "taxon")
+
+taxon_ASV_relabu <- ASV_relabu_long %>%
+  filter(level == "ASV") %>%
+  group_by(Plant.condition, ID, taxon) %>%
+  summarize(rel_abund = sum(rel_abund), .groups = "drop") %>%
+  mutate(taxon = ifelse(is.na(taxon), "Unclassified", taxon)) %>%
+  group_by(Plant.condition, taxon) %>%
+  summarize(mean_rel_abund = 100 * mean(rel_abund),
+            sd = 100 * sd(rel_abund),
+            .groups = "drop") %>%
+  mutate(taxon = str_replace_all(taxon, "\\*", ""))
+  #mutate(taxon = ifelse(taxon %in% c("Other", "Unclassified"),
+                      #taxon,
+                      #paste0("*", taxon, "*")))
+#Get top 10 ASVs (across both Healthy and Diseased in Soil B Rhizosphere)
+top_15_ASVs <- taxon_ASV_relabu %>%
+  group_by(taxon) %>%
+  summarize(max_abund = max(mean_rel_abund)) %>%
+  arrange(desc(max_abund)) %>%
+  slice_head(n = 15) %>%
+  pull(taxon)
+
+#Subset data to include only top 10 ASVs
+
+taxon_top15 <- taxon_ASV_relabu %>%
+  filter(taxon %in% top_15_ASVs) %>%
+  mutate(taxon = factor(taxon, levels = rev(top_15_ASVs)))  # reverse for plot ordering
+
+
+Fig_ASV_top15 <- ggplot(taxon_top15, aes(fill = Plant.condition, x = mean_rel_abund, y = taxon)) +
+  geom_errorbar(aes(xmin = mean_rel_abund, xmax = mean_rel_abund + sd),
+                position = position_dodge2(width = 0.8, reverse = TRUE, padding = 0),
+                width = 0.8,
+                size = 0.2) +
+  geom_col(position = position_dodge2(width = 0.8, reverse = TRUE, padding = 0), width = 0.8) +
+  scale_fill_manual(name = NULL,
+                    values = c("Healthy" = "#ffbf00", "Diseased" = "#5b9bd5")) +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL, x = "Mean Relative Abundance (%)") +
+  theme_classic() +
+  theme(axis.text.y = ggtext::element_markdown(size = 12, color = "black"),
+        legend.text = element_markdown(),
+        legend.key.size = unit(10, "pt"),
+        legend.position = c(0.85, 0.5),
+        panel.grid.major.x = element_line(color = "black", size = 0.25),
+        panel.spacing = unit(1, "lines"))
+
+Fig_ASV_top15
+
+# Save plot as TIFF
+ggsave(
+  filename = "Fig2_ASV_RhizoSoilB.jpeg",
+  plot = Fig_ASV_top15,
+  path = "~/Tomicro_2025/Square Bar plots/Rhizosphere Soil B",
+  width = 8, height = 5, dpi = 300, units = "in",
+  device = "jpeg"
+)
+
+
+
+
+
+
+
+
+
+```
+
