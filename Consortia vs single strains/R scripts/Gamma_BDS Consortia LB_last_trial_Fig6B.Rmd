@@ -1,0 +1,167 @@
+---
+title: "Gamma BDS consortia LB Last Trial   "
+author: "Philemon"
+date: "2026-03-17"
+output: html_document
+---
+
+```{r}
+
+library(readxl)
+library(dplyr)
+library(glmmTMB)
+library(emmeans)
+library(DHARMa)
+library(ggplot2)
+library(multcomp)
+#install.packages("writexl")
+library (writexl)
+```
+
+
+```{r}
+# 1) Load + standardize column names
+df_raw <- read_excel("~/Ad_Planta_Trials/Raw_data/Consortia/BDS sleceted bacteria_consortia_LB 2026.xlsx") %>%
+  rename(
+    Rep = Replicate,
+    severity_leaf = Diseased_leaf_area
+  ) %>%
+  mutate(
+    Treatment = factor(Treatment),
+    Rep       = factor(Rep),
+    Plant     = factor(Plant),
+    Leaf      = factor(Leaf),
+    severity_leaf = as.numeric(severity_leaf)
+  )
+
+View(df_raw)
+
+```
+
+
+```{r}
+
+# 2) Plant is the experimental unit: average leaves within plant
+df_plant <- df_raw %>%
+  group_by(Rep, Treatment, Plant) %>%
+  summarise(severity = mean(severity_leaf, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    Treatment = relevel(Treatment, ref = "Diseased control"),
+    severity_pos = severity + 0.5
+  )
+
+# sanity check
+df_plant %>% count(Rep, Treatment)
+
+# 3) Fit model (run-to-run variability)
+m1 <- glmmTMB(
+  severity_pos ~ Treatment + (1 | Rep),
+  family = Gamma(link = "log"),
+  data = df_plant
+)
+summary(m1)
+
+# Diagnostics (optional, but good to keep)
+res <- simulateResiduals(m1, n = 1000)
+plot(res)
+
+# 7) Estimated marginal means
+emm <- emmeans(m1, ~ Treatment)
+
+
+# 1) EMMs on the response scale (back-transformed)
+emm_resp <- emmeans(m1, ~ Treatment, type = "response")
+emm_df   <- as.data.frame(emm_resp)
+emm_df
+```
+
+```{r}
+# 0) Canonical clean function
+clean_trt <- function(x) str_squish(as.character(x))
+
+# 1) EMMs on response scale
+emm_df <- as.data.frame(emmeans(m1, ~ Treatment, type="response")) %>%
+  mutate(Treatment = clean_trt(Treatment))
+
+mu0 <- emm_df$response[emm_df$Treatment == "Diseased control"]
+
+plot_df <- emm_df %>%
+  filter(!Treatment %in% c("Diseased control", "Non-treated control")) %>%
+  mutate(
+    perc_reduction = (1 - response/mu0) * 100,
+    perc_low  = (1 - asymp.UCL/mu0) * 100,
+    perc_high = (1 - asymp.LCL/mu0) * 100,
+    ymin1 = perc_reduction,
+    ymax1 = perc_high
+  )
+
+# 2) Your desired order (MUST match cleaned labels)
+treat_order <- clean_trt(c(
+  "Copper standard",
+  "Cons 5 (Pb39+ Pb177+ Pb460)",
+  "Cons 1 (Pb39+ Pb177)",
+  "Cons 3 (Pb177+ Pb460)",
+  "Cons 6 (Pb39+ Pb460)",
+  "Pseudarthrobacter sp. Pb177",
+  "Pseudomonas sp. Pb460",
+  "Streptomyces sp. Pb39"
+))
+
+# 3) CLD on the same set, same cleaning
+emm_for_cld <- emmeans(m1, ~ Treatment) %>%
+  as.data.frame() %>%
+  mutate(Treatment = clean_trt(Treatment)) %>%
+  filter(Treatment %in% treat_order)
+
+# safest: rebuild an emmGrid with only treatments we plot
+emm_for_cld_grid <- emmeans(m1, ~ Treatment) %>%
+  subset(Treatment %in% treat_order)
+
+cld_tbl <- multcomp::cld(emm_for_cld_grid, Letters=letters, adjust="tukey") %>%
+  as.data.frame() %>%
+  transmute(
+    Treatment = clean_trt(Treatment),
+    cld = str_replace_all(.group, "\\s+", "")
+  )
+
+# 4) Join + force factor levels AFTER join
+plot_df2 <- plot_df %>%
+  mutate(Treatment = clean_trt(Treatment)) %>%
+  left_join(cld_tbl, by="Treatment") %>%
+  filter(Treatment %in% treat_order) %>%
+  mutate(
+    Treatment = factor(Treatment, levels = treat_order),
+    cld = ifelse(is.na(cld), "", cld)
+  )
+
+# sanity check (do this once)
+print(levels(plot_df2$Treatment))
+print(unique(as.character(plot_df2$Treatment)))
+
+# 5) Plot (order guaranteed)
+p <- ggplot(plot_df2, aes(x=Treatment, y=perc_reduction)) +
+  geom_col(width=0.65) +
+  geom_errorbar(aes(ymin = perc_reduction, ymax = perc_high), width=0, linewidth=0.6) +
+  geom_text(aes(y=ymax1 + 4, label=cld), size=5, vjust=0) +
+  scale_x_discrete(drop = FALSE) +   # <- critical
+  scale_y_continuous(limits=c(0,115), breaks=seq(0,100,20), expand=c(0,0)) +
+  labs(x="Treatment", y="Disease reduction vs diseased control (%)") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size=13, angle=60, vjust=1, hjust=1, face="italic"),
+    axis.text.y = element_text(size=14),
+    axis.title  = element_text(size=14),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(
+  filename = "BDSf_consortia_LB.tiff",
+  plot = p,
+  path = "~/Ad_Planta_Trials/Outputfiles/Plots",
+  width = 7.5, height = 6.5, dpi = 300, units = "in",
+  device = "tiff", compression = "lzw"
+)
+
+```
+
+

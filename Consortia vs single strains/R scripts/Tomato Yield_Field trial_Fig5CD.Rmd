@@ -1,0 +1,234 @@
+---
+title: "Fruit number and weight Field trial  "
+author: "Philemon"
+date: "2026-03-09"
+output: html_document
+---
+
+```{r}
+
+library(readxl)
+library(dplyr)
+library(glmmTMB)
+library(emmeans)
+library(DHARMa)
+library(ggplot2)
+library (tidyverse)
+library (multcomp)
+#install.packages("writexl")
+library (writexl)
+```
+
+```{r}
+
+# 1. Load and prepare
+df_yield <- read_excel("~/Ad_Planta_Trials/Raw_data/Field trial/Total fruit_number_weight.xlsx") %>%
+  rename(
+    Treatment    = Treatment,
+    Block        = Block,
+    Plant        = Plant,
+    fruit_number = `Total fruit number`,
+    fruit_weight = `Total fruit weight`
+  ) %>%
+  mutate(
+    Treatment = relevel(as.factor(Treatment), 
+                        ref = "Non-treated control"),
+    Block     = as.factor(Block),
+    Plant     = as.factor(Plant)
+  )
+View(df_yield)
+
+# 2. Quick summary
+cat("=== Mean yield per treatment ===\n")
+df_yield %>%
+  group_by(Treatment) %>%
+  summarise(
+    mean_number = round(mean(fruit_number), 1),
+    sd_number   = round(sd(fruit_number), 1),
+    mean_weight = round(mean(fruit_weight), 1),
+    sd_weight   = round(sd(fruit_weight), 1),
+    .groups     = "drop"
+  ) %>%
+  arrange(desc(mean_weight))
+
+# 3. Check distributions
+par(mfrow = c(1, 2))
+hist(df_yield$fruit_number, main = "Fruit number", xlab = "Count")
+hist(df_yield$fruit_weight, main = "Fruit weight (g)", xlab = "Weight")
+
+# === Model 1: Fruit NUMBER ===
+# Count data → Poisson or negative binomial
+m_number <- glmmTMB(
+  fruit_number ~ Treatment + (1|Block),
+  family = nbinom2(),    # negative binomial - robust to overdispersion
+  data   = df_yield
+)
+
+summary(m_number)
+res_number <- simulateResiduals(m_number, n = 1000)
+plot(res_number)
+
+# === Model 2: Fruit WEIGHT ===
+# Continuous positive → Gaussian 
+# Fruit weight - try Gaussian instead
+m_weight2 <- glmmTMB(
+  fruit_weight ~ Treatment + (1|Block),
+  family = gaussian(),
+  data   = df_yield
+)
+summary(m_weight2)
+res_weight2 <- simulateResiduals(m_weight2, n = 1000)
+plot(res_weight2)
+
+```
+Plots
+```{r}
+# === Emmeans for both outcomes ===
+emm_number <- emmeans(m_number, ~ Treatment, type = "response")
+emm_weight <- emmeans(m_weight2, ~ Treatment, type = "response")
+
+# Letter groupings
+cld_number <- multcomp::cld(emm_number,
+                             adjust  = "tukey",
+                             Letters = letters,
+                             alpha   = 0.05) %>%
+  as.data.frame() %>%
+  mutate(
+    .group    = trimws(.group),
+    outcome   = "Fruit number",
+    Treatment = factor(Treatment, levels = c(
+      "Non-treated control",
+      "Copper standard",
+      "Cons1 (Pb39 and Pb177)",
+      "Pseudathrobacter sp. Pb177",
+      "Streptomyces sp. Pb39"
+    ))
+  )
+
+cld_weight <- multcomp::cld(emm_weight,
+                             adjust  = "tukey",
+                             Letters = letters,
+                             alpha   = 0.05) %>%
+  as.data.frame() %>%
+  mutate(
+    .group    = trimws(.group),
+    outcome   = "Fruit weight (g)",
+    Treatment = factor(Treatment, levels = c(
+      "Non-treated control",
+      "Copper standard",
+      "Cons1 (Pb39 and Pb177)",
+      "Pseudathrobacter sp. Pb177",
+      "Streptomyces sp. Pb39"
+    ))
+  )
+
+print(cld_number)
+print(cld_weight)
+
+# Check column names first
+cat("=== cld_number columns ===\n")
+names(cld_number)
+
+cat("=== cld_weight columns ===\n")
+names(cld_weight)
+
+```
+Plots
+
+```{r}
+plot_yield <- function(cld_data, y_label) {
+  
+  # Detect the correct y column (emmean or response)
+  y_col <- ifelse("emmean" %in% names(cld_data), "emmean", "response")
+  ci_low <- ifelse("lower.CL" %in% names(cld_data), "lower.CL", "asymp.LCL")
+  ci_up  <- ifelse("upper.CL" %in% names(cld_data), "upper.CL", "asymp.UCL")
+  
+  ggplot(cld_data,
+         aes(x    = Treatment,
+             y    = .data[[y_col]],
+             fill = Treatment)) +
+
+    geom_col(width = 0.65, color = "black", linewidth = 0.3) +
+
+    geom_errorbar(aes(ymin = .data[[ci_low]],
+                      ymax = .data[[ci_up]]),
+                  width = 0.25, linewidth = 0.5) +
+
+    geom_text(aes(y     = .data[[ci_up]] + max(.data[[ci_up]]) * 0.03,
+                  label = .group),
+              size = 4, fontface = "bold") +
+
+    scale_fill_manual(values = trt_colors) +
+
+    scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+
+    labs(x = "Treatment", y = y_label) +
+
+    theme_bw() +
+    theme(
+      axis.text.x      = element_text(size = 12, angle = 55,
+                                      vjust = 1, hjust = 1,
+                                      face = "italic"),
+      axis.text.y      = element_text(size = 11),
+      axis.title       = element_text(size = 13),
+      legend.position  = "none",
+      panel.grid.minor = element_blank()
+    )
+}
+
+p_number <- plot_yield(cld_number, "Total fruit number")
+p_weight <- plot_yield(cld_weight, "Total fruit weight (g)")
+
+library(patchwork)
+p_number + p_weight +
+  plot_annotation(
+  )
+ggsave(
+  filename    = "yield_fruit_number_weight.tiff",
+  plot        = p_number + p_weight +
+                  plot_annotation(
+                  ),
+  path        = "~/Ad_Planta_Trials/Outputfiles/Field output files",
+  width       = 12,
+  height      = 6,
+  dpi         = 300,
+  units       = "in",
+  device      = "tiff",
+  compression = "lzw"
+)
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

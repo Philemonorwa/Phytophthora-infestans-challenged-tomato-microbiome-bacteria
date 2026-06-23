@@ -1,0 +1,228 @@
+---
+title: "In vitro tests consortia vs P. infestans "
+author: "Philemon"
+date: "2026-03-13"
+output: html_document
+---
+
+```{r}
+
+library(readxl)
+library(dplyr)
+library(glmmTMB)
+library(emmeans)
+library(DHARMa)
+library(ggplot2)
+#install.packages("writexl")
+library(tidyverse)
+library (writexl)
+```
+
+```{r}
+# 1. Load and clean
+
+ df <- readxl::read_excel(
+  "~/In_vitro_tests/In_vitro_tests_consortia_secondrun.xlsx",
+  sheet = "long"
+) %>%
+  rename(radius = `Mycelial growth radius (cm)`,
+         Rep    = `Experimental Run`) %>%
+  mutate( 
+      # Standardise treatment names
+    Treatment = trimws(Treatment),
+    Treatment = recode(Treatment,
+      "Cons 1(Pb39+ Pb177)"         = "Cons1 (Pb39+Pb177)",
+      "Cons 2 (Pb39+ Pb109)"        = "Cons2 (Pb39+Pb109)",
+      "Cons 3 (Pb177+ Pb460)"       = "Cons3 (Pb177+Pb460)",
+      "Cons 4(Pb39+ Pb107)"         = "Cons4 (Pb39+Pb107)",
+      "Cons 5 (Pb39+ Pb177+ Pb460)" = "Cons5 (Pb39+Pb177+Pb460)",
+      "Cons 6( Pb39+ Pb460)"        = "Cons6 (Pb39+Pb460)",
+      "Cons 7 (Pb39+ Pb107+ Pb109)" = "Cons7 (Pb39+Pb107+Pb109)",
+      "Cons 8 (Pb107+ Pb109)"       = "Cons8 (Pb107+Pb109)",
+      "Bacillus sp. Pb109"        = "Bacillus sp. Pb109",
+      "Chryseobacterium sp. Pb107" = "Chryseobacterium sp. Pb107",
+      "Pseudomonassp. Pb460"        = "Pseudomonas sp. Pb460",
+      "Pseudarthobacter sp. Pb177"  = "Pseudarthrobacter sp. Pb177",
+      "Streptomyces sp. Pb39"        = "Streptomyces sp. Pb39",
+    ),
+    Rep   = as.factor(Rep),
+    Media = as.factor(Media)
+  )
+
+ # 2. AVERAGE TECHNICAL REPLICATES
+# ============================================================
+df_avg <- df %>%
+  group_by(Treatment, Media, Rep) %>%
+  summarise(radius = mean(radius, na.rm = TRUE), .groups = "drop")
+```
+
+CALCULATE % INHIBITION vs NEGATIVE CONTROL
+```{r}
+df_inh <- df_avg %>%
+  group_by(Rep, Media) %>%
+  mutate(
+    neg_radius  = radius[Treatment == "Negative control"],
+    inhibition  = (1 - radius / neg_radius) * 100,
+    inh_prop    = inhibition / 100          # for beta regression
+  ) %>%
+  ungroup() %>%
+  filter(Treatment != "Negative control")
+
+# Check for values outside (0,1) for beta
+cat("=== Inhibition range ===\n")
+print(summary(df_inh$inhibition))
+cat("Values <= 0:", sum(df_inh$inh_prop <= 0), "\n")
+cat("Values >= 1:", sum(df_inh$inh_prop >= 1), "\n")
+
+# Squish to (0,1) if needed
+df_inh <- df_inh %>%
+  mutate(inh_prop = pmax(pmin(inh_prop, 0.999), 0.001))
+
+cat("\n=== Mean inhibition by Treatment x Media ===\n")
+df_inh %>%
+  group_by(Treatment, Media) %>%
+  summarise(mean_inh = round(mean(inhibition), 1), .groups = "drop") %>%
+  pivot_wider(names_from = Media, values_from = mean_inh) %>%
+  arrange(desc(LB))
+
+# ============================================================
+# 4. FIT BETA REGRESSION
+# Fixed: Treatment + Media | Random: Rep
+# ============================================================
+m_beta <- glmmTMB(
+  inh_prop ~ Treatment + Media + (1|Rep),
+  family = beta_family(link = "logit"),
+  data   = df_inh
+)
+
+summary(m_beta)
+res_beta <- simulateResiduals(m_beta, n = 1000)
+plot(res_beta)
+```
+
+E means
+```{r}
+# ============================================================
+# 5. EMMEANS + CLD
+# ============================================================
+emm_beta <- emmeans(m_beta, ~ Treatment | Media,
+                    type = "response")
+
+cld_beta <- multcomp::cld(emm_beta,
+                           adjust  = "tukey",
+                           Letters = letters,
+                           alpha   = 0.05) %>%
+  as.data.frame() %>%
+  mutate(
+    .group       = trimws(.group),
+    inhibition   = response * 100,
+    lower.CL     = asymp.LCL * 100,
+    upper.CL     = asymp.UCL * 100
+  )
+
+print(cld_beta)
+
+# Also get Dunnett contrasts vs negative control
+# (already excluded from model, so compare pairwise instead)
+contr_beta <- contrast(emm_beta,
+                        method = "pairwise",
+                        adjust = "tukey")
+summary(contr_beta, infer = TRUE)
+
+# ============================================================
+# 6. PLOT — ordered dot/bar chart faceted by Media
+# ============================================================
+
+# Order treatments by mean inhibition across both media
+trt_order <- cld_beta %>%
+  group_by(Treatment) %>%
+  summarise(mean_inh = mean(inhibition)) %>%
+  arrange(mean_inh) %>%
+  pull(Treatment)
+
+cld_beta <- cld_beta %>%
+  mutate(Treatment = factor(Treatment, levels = trt_order))
+
+# Colour: isolates vs consortia
+cld_beta <- cld_beta %>%
+  mutate(
+    type = ifelse(grepl("^Cons", Treatment), "Consortium", "Isolate")
+  )
+
+p_invitro2 <- ggplot(cld_beta,
+                     aes(x    = inhibition,
+                         y    = Treatment,
+                         color = type)) +
+
+  geom_vline(xintercept = 0, linetype = "dashed",
+             color = "gray60", linewidth = 0.5) +
+
+  geom_errorbarh(aes(xmin = lower.CL, xmax = upper.CL),
+                 height    = 0.3,
+                 linewidth = 0.6) +
+
+  geom_point(size = 3.5) +
+
+  geom_text(aes(x = upper.CL + 1.5, label = .group),
+            size = 3.5, hjust = 0, fontface = "bold") +
+
+  facet_wrap(~ Media, ncol = 2) +
+
+  scale_color_manual(values = c(
+    "Consortium" = "#2166ac",
+    "Isolate"    = "#d6604d"
+  )) +
+
+  scale_x_continuous(
+    limits = c(-10, 100),
+    breaks = seq(0, 100, 20),
+    expand = expansion(mult = c(0.02, 0.08))
+  ) +
+
+  labs(
+    x     = "Mycelial growth inhibition (%)",
+    y     = "Treatment",
+    color = "Type"
+  ) +
+
+  theme_bw() +
+  theme(
+    axis.text.y      = element_text(size = 14, face = "italic"),
+    axis.text.x      = element_text(size = 14),
+    axis.title       = element_text(size = 16),
+    strip.text       = element_text(size = 11, face = "bold"),
+    legend.position  = "bottom",
+    legend.text      = element_text(size = 14),
+    legend.title     = element_text(size = 14, face = "bold"),
+    panel.grid.minor = element_blank(),
+    plot.caption     = element_text(size = 8, color = "gray40")
+  )
+
+p_invitro2
+
+# Save
+ggsave(
+  filename    = "Invitro_secondrun_inhibition.tiff",
+  plot        = p_invitro2,
+  path        = "~/In_vitro_tests",
+  width       = 12,
+  height      = 8,
+  dpi         = 300,
+  units       = "in",
+  device      = "tiff",
+  compression = "lzw"
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+  
