@@ -1,0 +1,381 @@
+---
+title: "BDS Consortia Combined"
+author: "Philemon"
+date: "2026-02-06"
+output: html_document
+---
+
+```{r}
+
+library(readxl)
+library(dplyr)
+library(glmmTMB)
+library(emmeans)
+library(DHARMa)
+library(ggplot2)
+
+```
+
+
+```{r}
+# 1) Load + standardize column names
+df_raw <- read_excel("~/Ad_Planta_Trials/Raw_data/Consortia/SelectedbacterialconsortiavsPinfestans_Combined.xlsx") %>%
+  rename(
+    Treatment = Treatment,
+    Rep = Replicate,
+    severity_leaf = Diseased_leaf_area
+  ) %>%
+  mutate(
+    Treatment = as.factor(Treatment),
+    Rep = as.factor(Rep),
+    Plant = as.factor(Plant),
+    Leaf  = as.factor(Leaf),
+    severity_leaf = as.numeric(severity_leaf)
+  )
+
+
+```
+
+
+```{r}
+
+# 2) Plant is the experimental unit: average leaves within plant
+df_plant <- df_raw %>%
+  group_by(Rep, Treatment, Plant) %>%
+  summarise(severity = mean(severity_leaf, na.rm = TRUE), .groups = "drop")
+
+# 3) Prepare for Gamma (no zeros). Offset should be small.
+df_plant <- df_plant %>%
+  mutate(severity_pos = severity + 0.5)
+
+# 4) Set reference level for comparisons (infected control)
+df_plant <- df_plant %>%
+  mutate(Treatment = relevel(Treatment, ref = "Diseased control"))
+
+# 5) Fit mixed model: Treatment fixed, Rep random
+m1 <- glmmTMB(
+  severity_pos ~ Treatment + (1|Rep),
+  family = Gamma(link = "log"),
+  data = df_plant
+)
+summary(m1)
+
+
+# 6) Diagnostics
+res <- simulateResiduals(m1, n = 1000)
+plot(res)
+
+# 7) Estimated marginal means
+emm <- emmeans(m1, ~ Treatment)
+
+# 8) Dunnett-style: each treatment vs infected control (Diseased control)
+contr_pos <- contrast(
+  emm,
+  method = "trt.vs.ctrl",
+  ref = "Diseased control",
+  adjust = "BH"
+)
+# On model scale
+summary(contr_pos)
+
+#Scientific question is: “Which treatments differ from the diseased control?”
+#Then the best-matched procedure is Dunnett (many-to-one). It’s more powerful than BH because it’s designed specifically for #comparisons vs a single control.
+
+contr_pos <- contrast(
+  emm,
+  method = "trt.vs.ctrl",
+  ref = "Diseased control",
+  adjust = "dunnettx"   # if supported
+)
+summary(contr_pos)
+summary(contr_pos, type="response")
+
+#checking for Consortia vs individual isolates
+library(emmeans)
+
+# Check the exact treatment level names emmeans is using
+levs <- levels(emm)$Treatment
+levs
+# (Make sure these match your names exactly, incl. spaces vs underscores)
+
+# Helper: make a "A - B" contrast vector with zeros for all other treatments
+mk_con <- function(A, B, levs){
+  v <- setNames(rep(0, length(levs)), levs)
+  v[A] <-  1
+  v[B] <- -1
+  v
+}
+
+# Define the exact level names here (must match levs!)
+A1 <- "Cons1"
+B1 <- "Streptomyces_sp._Pb39"
+
+A2 <- "Cons1"
+B2 <- "Pseudarthrobacter_sp._Pb177"
+
+A3 <- "Cons2"
+B3 <- "Streptomyces_sp._Pb39"
+
+A4 <- "Cons2"
+B4 <- "Bacillus_sp._Pb109"
+
+A5 <- "Cons3"
+B5 <- "Pseudarthrobacter_sp._Pb177"
+
+A6 <- "Cons3"
+B6 <- "Pseudomonas_sp._Pb460"
+
+cons_list <- list(
+  "Cons1 vs Pb39"  = mk_con(A1, B1, levs),
+  "Cons1 vs Pb177" = mk_con(A2, B2, levs),
+  "Cons2 vs Pb39"  = mk_con(A3, B3, levs),
+  "Cons2 vs Pb109" = mk_con(A4, B4, levs),
+  "Cons3 vs Pb177" = mk_con(A5, B5, levs),
+  "Cons3 vs Pb460" = mk_con(A6, B6, levs)
+)
+
+cons_contr <- contrast(emm, method = cons_list, adjust = "BH")
+
+summary(cons_contr)                 # log scale (difference of logs)
+summary(cons_contr, type="response")# ratio scale (Cons / single)
+
+#End of consortia vs isolates check
+
+# On response scale (ratios = treated / control)
+contr_pos_resp <- summary(contr_pos, type = "response", infer = c(TRUE, TRUE)) %>%
+  as.data.frame()
+
+contr_pos_resp
+
+```
+Convert ratios to “% reduction in severity” (and CI)
+```{r}
+
+# Standardize CI columns (emmeans may output lower.CL/upper.CL or asymp.LCL/asymp.UCL)
+if(all(c("lower.CL","upper.CL") %in% names(contr_pos_resp))) {
+  contr_pos_resp <- contr_pos_resp %>% rename(CI_low = lower.CL, CI_high = upper.CL)
+} else if(all(c("asymp.LCL","asymp.UCL") %in% names(contr_pos_resp))) {
+  contr_pos_resp <- contr_pos_resp %>% rename(CI_low = asymp.LCL, CI_high = asymp.UCL)
+} else {
+  stop("CI columns not found. Run names(contr_pos_resp) and check.")
+}
+
+eff_df <- contr_pos_resp %>%
+  mutate(
+    Treatment = gsub(" / Diseased control", "", contrast),
+    Treatment = gsub(" - Diseased control", "", Treatment),
+
+    # ratio = mean_treatment / mean_diseased_control
+    perc_reduction = (1 - ratio) * 100,
+
+    # transform CI correctly: [low, high] on ratio -> [1-high, 1-low] on reduction
+    perc_low  = (1 - CI_high) * 100,
+    perc_high = (1 - CI_low)  * 100,
+  ) %>%
+  arrange(desc(perc_reduction))
+
+eff_df %>% select(Treatment, ratio, CI_low, CI_high, perc_reduction, perc_low, perc_high, p.value)
+
+#Save table with rounded decimals
+
+eff_df_out <- eff_df %>%
+  mutate(across(c(ratio, CI_low, CI_high), ~ round(.x, 3)),
+         across(c(perc_reduction, perc_low, perc_high), ~ round(.x, 1)),
+         p.value = signif(p.value, 3))
+
+write.csv(eff_df_out, "~/Ad_Planta_Trials/Outputfiles/eff_df_table.csv", row.names = FALSE)
+
+
+```
+
+Plot: % reduction vs infected control
+
+```{r}
+
+treat_order <- c(
+  "Copper standard", "Nutrient broth", "Diseased control",   # controls together
+  "Cons1", "Cons2", "Cons3",                                 # consortia together
+  "Pseudarthrobacter_sp._Pb177", "Pseudomonas_sp._Pb460",     # isolates
+  "Streptomyces_sp._Pb39", "Bacillus_sp._Pb109"
+)
+
+treat_labels <- c(
+  "Copper standard" = "Copper standard",
+  "Nutrient broth"  = "Nutrient broth",
+  "Cons1" = "Cons1 (Pb39+Pb177)",
+  "Cons2" = "Cons2 (Pb39+Pb109)",
+  "Cons3" = "Cons3 (Pb177+Pb460)",
+  "Pseudarthrobacter_sp._Pb177" = "Pseudarthrobacter sp. Pb177",
+  "Pseudomonas_sp._Pb460"       = "Pseudomonas sp. Pb460",
+  "Streptomyces_sp._Pb39"       = "Streptomyces sp. Pb39",
+  "Bacillus_sp._Pb109"          = "Bacillus sp. Pb109"
+)
+
+
+
+# 3) Prepare plot data + p-value labels
+eff_plot <- eff_df %>%
+  filter(!Treatment %in% c("Healthy control", "Diseased control")) %>%
+  mutate(
+    Treatment = trimws(as.character(Treatment)),
+    Treatment = factor(Treatment, levels = treat_order),
+    p_label = ifelse(p.value < 0.001, "p<0.001",
+                     paste0("p=", format(p.value, scientific = TRUE, digits = 2)))
+  ) %>%
+  filter(!is.na(Treatment))
+
+
+p_bar_v <- ggplot(eff_plot, aes(x = Treatment, y = perc_reduction)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_col(width = 0.50) +
+  geom_errorbar(aes(ymin = perc_low, ymax = perc_high), width = 0.20, linewidth = 0.6) +
+  geom_text(aes(y = pmin(perc_high + 4, 103), label = p_label),
+            angle = 0, vjust = 0, size = 3.2) +
+  scale_x_discrete(labels = treat_labels) +
+  scale_y_continuous(limits = c(0, 105), breaks = seq(0, 100, 20), expand = c(0, 0)) +
+  labs(x = "Treatment", y = "Disease reduction vs infected control (%)") +
+  theme_bw() +
+  theme(
+    axis.text.x  = element_text(size = 13, angle = 60, vjust = 1, hjust = 1, face = "italic"),
+    axis.text.y  = element_text(size = 12),
+    axis.title   = element_text(size = 14),
+    panel.grid.minor = element_blank()
+  )
+
+p_bar_v
+
+
+
+ggsave(
+  filename = "BDSf_reduction_vs_control.tiff",
+  plot = p_bar_v,
+  path = "~/Ad_Planta_Trials/Outputfiles/Plots",
+  width = 7.5, height = 6.5, dpi = 300, units = "in",
+  device = "tiff", compression = "lzw"
+)
+
+```
+Rep effects
+
+```{r}
+
+library(dplyr)
+#This shows which Rep is “higher/lower severity overall” after accounting for Treatment.
+re_rep <- ranef(m1)$cond$Rep %>%
+  tibble::rownames_to_column("Rep") %>%
+  rename(b_rep = `(Intercept)`)
+
+re_rep
+
+#Plot the Rep effects
+library(ggplot2)
+
+ggplot(re_rep, aes(x = Rep, y = b_rep)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(size = 3) +
+  labs(y = "Rep random intercept (log scale)", x = "Rep") +
+  theme_bw()
+
+
+#show Rep effect as % change (back-transformed)
+re_rep <- ranef(m1)$cond$Rep %>%
+  tibble::rownames_to_column("Rep") %>%
+  rename(b_rep = `(Intercept)`) %>%
+  mutate(mult = exp(b_rep),
+         perc_change = (mult - 1) * 100)
+
+re_rep
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+
+treat_order <- c(
+  "Copper standard", "Nutrient broth", "Diseased control",   # controls together
+  "Cons1", "Cons2", "Cons3",                                 # consortia together
+  "Pseudarthrobacter_sp._Pb177", "Pseudomonas_sp._Pb460",     # isolates
+  "Streptomyces_sp._Pb39", "Bacillus_sp._Pb109"
+)
+
+# 1) get diseased-control mean per Rep (so reduction is computed within each run)
+ctrl_by_rep <- df_plant %>%
+  filter(Treatment == "Diseased control") %>%
+  group_by(Rep) %>%
+  summarise(ctrl_mean = mean(severity, na.rm = TRUE), .groups="drop")
+
+# 2) compute % reduction per plant relative to diseased control in the same Rep
+df_red <- df_plant %>%
+  left_join(ctrl_by_rep, by = "Rep") %>%
+  mutate(perc_reduction = (1 - severity/ctrl_mean) * 100)
+
+#Drop the controls from the plot
+df_red2 <- df_red %>%
+  mutate(
+    Treatment = trimws(as.character(Treatment)),
+    Treatment = factor(Treatment, levels = treat_order)
+  ) %>%
+  filter(
+    Treatment != "Diseased control",
+    Treatment != "Healthy control"   # drop it
+  ) %>%
+  droplevels()
+ 
+# df_red2 = your per-plant % reduction data with Treatment as factor (already ordered)
+# eff_df  = your model summary table containing Treatment + sig (***, **, *, ns)
+
+# Make a nice p-value label
+eff_lbl <- eff_df %>%
+  mutate(
+    p_label = case_when(
+      is.na(p.value)        ~ "",
+      p.value < 0.001       ~ "p<0.001",
+      TRUE                  ~ paste0("p=", formatC(p.value, format = "f", digits = 3))
+    )
+  ) %>%
+  select(Treatment, p_label)
+
+
+# y-position above each treatment distribution
+ann <- df_red2 %>%
+  group_by(Treatment) %>%
+  summarise(y = min(103, max(perc_reduction, na.rm = TRUE) + 6), .groups = "drop") %>%
+  left_join(eff_lbl, by = "Treatment")
+
+
+# 3) plot
+ggplot(df_red2, aes(x = Treatment, y = perc_reduction)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.12, alpha = 0.6, size = 1.6) +
+  geom_text(data = ann, aes(x = Treatment, y = y, label = p_label),
+            inherit.aes = FALSE, size = 3.6) +
+  scale_y_continuous(limits = c(0, 105), breaks = seq(0, 100, 20)) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1),
+    panel.border = element_rect(color="black", fill = NA)
+  ) +
+  labs(x = "Treatment", y = "Disease reduction vs infected control (%)")
+
+
+
+
+
+```
+
+
+
+
+
+

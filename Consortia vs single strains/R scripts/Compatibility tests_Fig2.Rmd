@@ -1,0 +1,227 @@
+---
+Title: "Compatibility asssays"
+author: "Philemon"
+date: "2025-09-29"
+output: html_document
+---
+```{r}
+library(tidyverse)
+install.packages("pheatmap")
+library(pheatmap)
+```
+
+```{r}
+# Load your data frame
+Comp_test <- read_excel("~/In_vitro_tests/Compatibility_tests.xlsx")
+
+# Convert to a standard data frame (for easier row name manipulation)
+Comp_test <- as.data.frame(Comp_test)
+
+# Assign the first column (Isolate IDs) as row names
+# This is the line that fixes the NULL error
+rownames(Comp_test) <- Comp_test[[1]]
+
+# Remove the redundant first column from the data frame
+Comp_test <- Comp_test[, -1]
+```
+
+```{r}
+# Convert to matrix and ensure all contents are numeric (0 to 3)
+Comp_test_mat <- as.matrix(Comp_test)
+mode(Comp_test_mat) <- "numeric"
+
+# --- Final Diagnostic Check ---
+isolate_names <- rownames(Comp_test_mat)
+if (is.null(isolate_names) | length(isolate_names) == 0) {
+  # This should now NOT execute!
+  stop("Matrix creation failed. Check your raw Excel file structure.")
+} else {
+  print("Matrix prepared successfully. Proceed to annotations.")
+}
+```
+
+```{r}
+# --- 1. Create Annotation Data Frames ---
+
+# Function to extract the Genus (the text before the first underscore)
+extract_genus <- function(name) {
+  # This uses the safe method to extract the first element after splitting by '_'
+  sapply(as.character(name), function(x) {
+    strsplit(x, "_", fixed = TRUE)[[1]][1]
+  })
+}
+
+isolate_names <- rownames(Comp_test_mat)
+genus_names <- extract_genus(isolate_names)
+
+# Create the annotation data frames (row names are the full isolate IDs)
+ann_row <- data.frame(
+  Genus = genus_names,
+  row.names = isolate_names
+)
+ann_col <- data.frame(
+  Genus = genus_names,
+  row.names = isolate_names
+)
+
+# Ensure the 'Genus' column is a factor
+ann_row$Genus <- factor(ann_row$Genus)
+
+ann_col$Genus <- factor(ann_col$Genus)
+
+
+
+
+# --- 2. Define Annotation Colors (Must match genus names exactly) ---
+# NOTE: The names here MUST match the factor levels of ann_row$Genus exactly.
+genus_colors <- setNames(
+  c("#1F78B4", "#33A02C", "#E31A1C", "#FF7F00", "#6A3D9A","#B15928", "#A6CEE3", "#B2DF8A", "#008080", "#FB9A99", "#CAB2D6"),
+  c("Acidovorax sp.", "Bacillus sp.", "Chryseobacterium sp.", "Microbacterium sp.", "Paenibacillus sp.", "Pseudarthrobacter sp.", "Pseudomonas sp.","Rhizobiaceae sp.","Rhizobium sp.", "Sphingomonas sp.", "Streptomyces sp.")
+)
+
+
+ann_colors = list(
+  Genus = genus_colors
+)
+```
+
+
+```{r}
+# --- 1. Reorder Isolates by Genus and Name ---
+
+# Get the order of isolates based on Genus (primary sort) and then Isolate name (secondary sort)
+# Using 'order' on the Genus factor first, then on the row names (Isolate IDs)
+genus_order <- order(ann_row$Genus, rownames(Comp_test_mat))
+
+# Reorder the matrix rows and columns
+Comp_test_mat_ordered <- Comp_test_mat[genus_order, genus_order]
+
+# Reorder the annotation data frames
+ann_row_ordered <- ann_row[genus_order, , drop = FALSE]
+ann_col_ordered <- ann_col[genus_order, , drop = FALSE]
+```
+
+```{r}
+# Define output parameters
+png("Compatibility_test.png", width = 3000, height = 2400, res =300)
+
+file_name <- "~/In_vitro_tests/Compatibility_test.pdf"
+width_inches <- 14 
+height_inches <- 12
+dpi <- 300
+
+tiff(file = "Compatibility_test.tiff", 
+    width = 3000, 
+    height = 2700, # 9 inches * 300 dpi
+    res = 300)
+
+
+
+# Open the PNG graphics device
+png(filename = file_name, 
+    width = width_pixels, 
+    height = height_pixels, 
+    res = dpi)
+# Open the PDF graphics device
+#pdf(file = file_name, 
+    #width = width_inches, 
+    #height = height_inches)
+
+# ----- make thicker separators between genera -----
+gaps_idx <- which(ann_row_ordered$Genus[-1] !=
+                  ann_row_ordered$Genus[-nrow(ann_row_ordered)])
+
+```
+
+
+
+```{r}
+# --- 2. Plot the Expanded and Ordered Heatmap ---
+
+# Matrix colors and breaks (as previously defined)
+breaks <- c(-0.5, 0.5, 1.5, 2.5, 3.5)
+cols <- c("#1E88E5", "#FFC107", "#FF7043", "#C62828") # Green (0) to Red (3)
+
+# Open TIFF graphics device
+tiff(
+  filename = "~/In_vitro_tests/Compatibility_test.tiff",
+ width = 18,
+ height = 16,
+units = "in",
+  res = 400,
+  compression = "lzw"
+)
+
+pheatmap(
+  Comp_test_mat_ordered, # Use the ordered matrix
+  color = cols,
+  breaks = breaks,
+  cluster_rows = FALSE, # DISABLE CLUSTERING to maintain genus order
+  cluster_cols = FALSE, # DISABLE CLUSTERING to maintain genus order
+  annotation_row = ann_row_ordered, # Use the ordered annotations
+  #annotation_col = ann_col_ordered, # Use the ordered annotations
+  annotation_colors = ann_colors, 
+  legend_breaks = 0:3,
+  legend_labels = c("0 Fully compatible", "1 Weakly incompatible", "2 Moderately incompatible", "3 Not compatible"),
+  display_numbers = FALSE,
+  border_color= "grey40",
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize = 9,
+  fontsize_row = 8,
+  fontsize_col = 8,
+  #main = "Isolate–isolate compatibility",
+  gaps_row = gaps_idx,
+  gaps_col = gaps_idx,
+  )
+dev.off()
+```
+```{r}
+
+
+breaks <- c(-0.5, 0.5, 1.5, 2.5, 3.5)
+cols   <- c("#1E88E5", "#FFC107", "#FF7043", "#C62828")
+
+gaps_idx <- which(
+  ann_row_ordered$Genus[-1] != ann_row_ordered$Genus[-nrow(ann_row_ordered)]
+)
+
+# choose figure size based on matrix size
+w <- ncol(Comp_test_mat_ordered) * 0.35 + 6
+h <- nrow(Comp_test_mat_ordered) * 0.35 + 4
+
+pheatmap(
+  Comp_test_mat_ordered,
+  color = cols,
+  breaks = breaks,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_row = ann_row_ordered,
+  annotation_colors = ann_colors,
+  legend_breaks = 0:3,
+  legend_labels = c(
+    "0 Fully compatible",
+    "1 Weakly incompatible",
+    "2 Moderately incompatible",
+    "3 Not compatible"
+  ),
+  border_color = "grey40",
+  gaps_row = gaps_idx,
+  gaps_col = gaps_idx,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize = 9,
+  fontsize_row = 8,
+  fontsize_col = 8,
+  cellwidth = 14,
+  cellheight = 14,
+  filename = "~/In_vitro_tests/Compatibility_test.tiff",
+  width = w,
+  height = h
+)
+dev.off()
+
+```
+
+
+
