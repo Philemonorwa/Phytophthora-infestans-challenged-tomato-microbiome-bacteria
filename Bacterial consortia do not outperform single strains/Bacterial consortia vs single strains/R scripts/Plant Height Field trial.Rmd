@@ -1,0 +1,246 @@
+---
+title: "Plant height Field trial  "
+author: "Philemon"
+date: "2026-03-09"
+output: html_document
+---
+
+```{r}
+
+library(readxl)
+library(dplyr)
+library(glmmTMB)
+library(emmeans)
+library(DHARMa)
+library(ggplot2)
+library (tidyverse)
+library (multcomp)
+#install.packages("writexl")
+library (writexl)
+```
+Repeated measures on the same plants means we need to account for the within-plant correlation over time. Here's the full analysis:
+
+```{r}
+
+# 1. Load and prepare
+
+df_height<- read_excel("~/Ad_Planta_Trials/Raw_data/Field trial/Field_trial_results_Plantheight_2025.xlsx") %>%
+  rename(
+    Treatment = Treatment,
+    Month     = Month,
+    Block     = Block,
+    Plant     = Plant,
+    height    = `Plant height`
+  ) %>%
+  mutate(
+    Treatment = relevel(as.factor(Treatment), 
+                        ref = "Non-treated control"),
+    Month     = factor(Month, levels = c("May", "June", "July")),
+    Block     = as.factor(Block),
+    Plant     = as.factor(Plant),
+    # Unique plant ID across blocks and treatments
+    Plant_ID  = as.factor(paste(Treatment, Block, Plant, sep = "_"))
+  )
+View(df_height)
+
+# 2. Check data
+cat("=== Sample size ===\n")
+df_height %>% count(Treatment, Month)
+
+cat("\n=== Height summary by Treatment x Month ===\n")
+df_height %>%
+  group_by(Treatment, Month) %>%
+  summarise(
+    mean_h = round(mean(height), 1),
+    sd_h   = round(sd(height), 1),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = Month, 
+              values_from = c(mean_h, sd_h))
+
+# 3. Fit repeated measures mixed model
+# Fixed: Treatment * Month (tests growth promotion + temporal change)
+# Random: Block (field variation) + Plant_ID (repeated measures)
+# Plant_ID accounts for the within-plant correlation across months
+
+m_height <- glmmTMB(
+  height ~ Treatment * Month + 
+           (1 | Block) + 
+           (1 | Plant_ID),
+  family = gaussian(),
+  data   = df_height
+)
+
+summary(m_height)
+
+# 4. Diagnostics
+res_h <- simulateResiduals(m_height, n = 1000)
+plot(res_h)
+#KS test significant (p=0.00026) — residuals deviate from uniform distribution
+#Outlier test significant (p=0) — several red asterisks visible at extremes
+#Dispersion n.s. — variance is fine, so it's not overdispersion
+#The likely causes are the extreme outlier plants 
+# Remove flagged outliers
+df_height_clean <- df_height %>%
+  group_by(Month) %>%
+  mutate(
+    mean_h  = mean(height),
+    sd_h    = sd(height),
+    z_score = (height - mean_h) / sd_h
+  ) %>%
+  ungroup() %>%
+  filter(abs(z_score) <= 2.5)
+
+cat("=== Rows removed ===\n")
+nrow(df_height) - nrow(df_height_clean)
+
+# Refit
+m_height2 <- glmmTMB(
+  height ~ Treatment * Month +
+           (1 | Block) +
+           (1 | Plant_ID),
+  family = gaussian(),
+  data   = df_height_clean
+)
+
+res_h2 <- simulateResiduals(m_height2, n = 1000)
+plot(res_h2)
+
+
+```
+
+Extract results
+```{r}
+# === Q1: Which treatments promote growth vs non-treated control? ===
+emm_h <- emmeans(m_height2, ~ Treatment | Month)
+
+contr_h <- contrast(emm_h,
+                    method = "trt.vs.ctrl",
+                    ref    = "Non-treated control",
+                    adjust = "dunnettx")
+
+cat("=== Treatment vs Non-treated control ===\n")
+summary(contr_h, infer = TRUE)
+
+# === Q2: Height change between months ===
+cat("\n=== Month effect ===\n")
+emm_month <- emmeans(m_height2, ~ Month)
+pairs(emm_month, adjust = "tukey")
+
+# === Q3: Interaction test ===
+m_height_noint <- glmmTMB(
+  height ~ Treatment + Month +
+           (1 | Block) + (1 | Plant_ID),
+  family = gaussian(),
+  data   = df_height_clean
+)
+
+cat("\n=== Interaction test ===\n")
+anova(m_height_noint, m_height2)
+
+# === Letter groupings for plotting ===
+cld_height <- multcomp::cld(emm_h,
+                             adjust  = "tukey",
+                             Letters = letters,
+                             alpha   = 0.05) %>%
+  as.data.frame() %>%
+  mutate(
+    .group    = trimws(.group),
+    Treatment = factor(Treatment, levels = c(
+      "Non-treated control",
+      "Copper standard",
+      "Cons1 (Pb39 and Pb177)",
+      "Streptomyces sp. Pb39",
+      "Pseudathrobacter sp. Pb177"
+    ))
+  )
+
+print(cld_height)
+#Save y
+write_xlsx(cld_height, "~/Ad_Planta_Trials/Outputfiles/Field output files/Plant trial_cld_height.xlsx")
+
+
+# === Means per Treatment x Month for trajectory plot ===
+emm_plot_data <- emmeans(m_height2, ~ Treatment + Month) %>%
+  as.data.frame()
+
+print(emm_plot_data)
+```
+
+
+BAr plots
+```{r}
+library(tidyverse)
+p_bar_height <- ggplot(emm_plot_data,
+                       aes(x    = Treatment,
+                           y    = emmean,
+                           fill = Month)) +
+
+  geom_col(position = position_dodge(width = 0.75),
+           width    = 0.7,
+           color    = "black",
+           linewidth = 0.3) +
+
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position  = position_dodge(width = 0.75),
+                width     = 0.2,
+                linewidth = 0.5) +
+
+  scale_fill_manual(
+    values = c(
+      "May"  = "#a8d8ea",   # light blue
+      "June" = "#4a90d9",   # medium blue
+      "July" = "#1a3a5c"    # dark blue
+    )
+  ) +
+
+  scale_y_continuous(
+    breaks = seq(0, 230, 20),
+    limits = c(0, 235),
+    expand = c(0, 0)
+  ) +
+
+  labs(
+    x       = "Treatment",
+    y       = "Plant height (cm)",
+    fill    = "Month"
+  ) +
+
+  theme_bw() +
+  theme(
+    axis.text.x      = element_text(size = 10, angle = 45,
+                                    vjust = 1, hjust = 1,
+                                    face = "italic"),
+    axis.text.y      = element_text(size = 11),
+    axis.title       = element_text(size = 13),
+    legend.text      = element_text(size = 11),
+    legend.title     = element_text(size = 11, face = "bold"),
+    legend.position  = "right",
+    panel.grid.minor = element_blank(),
+    plot.caption     = element_text(size = 9, color = "gray40")
+  )
+
+p_bar_height
+
+ggsave(
+  filename = "Field trial_PlantHeight.tiff",
+  plot = p_bar_height,
+  path = "~/Ad_Planta_Trials/Outputfiles/Field output files",
+  width = 7.5, height = 6.5, dpi = 300, units = "in",
+  device = "tiff", compression = "lzw"
+)
+```
+
+```
+
+
+
+
+
+
+
+
+
+
+
+

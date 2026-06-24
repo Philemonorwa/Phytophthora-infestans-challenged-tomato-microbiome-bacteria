@@ -1,0 +1,329 @@
+---
+title: "Pigments Field trial  "
+author: "Philemon"
+date: "2026-03-09"
+output: html_document
+---
+
+```{r}
+
+library(readxl)
+library(dplyr)
+library(glmmTMB)
+library(emmeans)
+library(DHARMa)
+library(ggplot2)
+library (tidyverse)
+library (multcomp)
+#install.packages("writexl")
+library (writexl)
+```
+
+```{r}
+
+# 1. Load and prepare
+
+df_pig <- readxl::read_excel("~/Ad_Planta_Trials/Raw_data/Field trial/Pigment_Field_Trial Final_fixed_May.xlsx") %>%
+  rename(
+    NBI          = `Nitrogen Balanced Index`
+  ) %>%
+  mutate(
+    Month     = factor(Month, levels = c("May", "June", "July")),
+    Treatment = relevel(as.factor(Treatment), ref = "Non-treated control"),
+    Block     = as.factor(Block),
+    Plant_ID  = as.factor(paste(Treatment, Block, Plant, sep = "_"))
+  )
+
+View(df_pig)
+
+# Replace zeros with NA (failed readings)
+df_pig <- df_pig %>%
+  mutate(
+    Anthocyanins = ifelse(Anthocyanins == 0, NA, Anthocyanins),
+    NBI          = ifelse(NBI          == 0, NA, NBI)
+  )
+#2. AVERAGE 2 READINGS PER PLANT PER VISIT
+# ============================================================
+df_plant <- df_pig %>%
+  group_by(Treatment, Month, Block, Plant, Plant_ID) %>%
+  summarise(
+    Chlorophyll  = mean(Chlorophyll,  na.rm = TRUE),
+    Flavonols    = mean(Flavonols,    na.rm = TRUE),
+    Anthocyanins = mean(Anthocyanins, na.rm = TRUE),
+    NBI          = mean(NBI,          na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("=== Cleaned plant-level summary ===\n")
+df_plant %>%
+  group_by(Month) %>%
+  summarise(across(c(Chlorophyll, Flavonols, Anthocyanins, NBI),
+                   ~ round(mean(.x, na.rm=TRUE), 3)))
+
+
+```
+
+Fit models
+```{r}
+#3. FIT MODELS — repeated measures (same plants May→Jul)
+# Fixed: Treatment * Month | Random: Block + Plant_ID
+# ============================================================
+
+# --- Chlorophyll ---
+m_chl <- glmmTMB(
+  Chlorophyll ~ Treatment * Month + (1|Block) + (1|Plant_ID),
+  family = gaussian(), data = df_plant
+)
+cat("\n=== Chlorophyll model ===\n"); summary(m_chl)
+res_chl <- simulateResiduals(m_chl, n=1000); plot(res_chl)
+
+# --- Flavonols ---
+m_flav <- glmmTMB(
+  Flavonols ~ Treatment * Month + (1|Block) + (1|Plant_ID),
+  family = gaussian(), data = df_plant
+)
+cat("\n=== Flavonols model ===\n"); summary(m_flav)
+res_flav <- simulateResiduals(m_flav, n=1000); plot(res_flav)
+
+# --- Anthocyanins ---
+m_anth <- glmmTMB(
+  Anthocyanins ~ Treatment * Month + (1|Block) + (1|Plant_ID),
+  family = gaussian(), data = df_plant
+)
+cat("\n=== Anthocyanins model ===\n"); summary(m_anth)
+res_anth <- simulateResiduals(m_anth, n=1000); plot(res_anth)
+
+# --- NBI ---
+m_nbi <- glmmTMB(
+  NBI ~ Treatment * Month + (1|Block) + (1|Plant_ID),
+  family = gaussian(), data = df_plant
+)
+cat("\n=== NBI model ===\n"); summary(m_nbi)
+res_nbi <- simulateResiduals(m_nbi, n=1000); plot(res_nbi)
+
+# If other models pass, try Gamma for NBI
+m_nbi2 <- glmmTMB(
+  NBI ~ Treatment * Month + (1|Block) + (1|Plant_ID),
+  family = Gamma(link = "log"),
+  data   = df_plant
+)
+
+res_nbi2 <- simulateResiduals(m_nbi2, n=1000); plot(res_nbi2)
+plot(res_nbi2)
+
+
+
+
+# ============================================================
+# 4. EMMEANS — contrasts vs Non-treated control per month
+# ============================================================
+for(mod in list(m_chl, m_flav, m_anth, m_nbi)) {
+  nm <- deparse(substitute(mod))
+}
+
+extract_contrasts <- function(model, label) {
+  emm <- emmeans(model, ~ Treatment | Month)
+  contr <- contrast(emm, method="trt.vs.ctrl",
+                    ref="Non-treated control", adjust="dunnettx")
+  cat(paste0("\n=== ", label, " contrasts ===\n"))
+  print(summary(contr, infer=TRUE))
+}
+
+extract_contrasts(m_chl,  "Chlorophyll")
+extract_contrasts(m_flav, "Flavonols")
+extract_contrasts(m_anth, "Anthocyanins")
+extract_contrasts(m_nbi2,  "NBI")
+```
+Plots
+```{r}
+# ============================================================
+# COMBINED 2x2 PIGMENT PLOT
+# ============================================================
+library(patchwork)
+
+trt_colors <- c(
+  "Non-treated control"         = "gray50",
+  "Copper standard"             = "#009E73",
+  "Cons1 (Pb39 and Pb177)"      = "#56B4E9",
+  "Pseudathrobacter sp. Pb177"  = "#CC79A7",
+  "Streptomyces sp. Pb39"       = "#E69F00"
+)
+
+trt_levels <- c(
+  "Non-treated control",
+  "Copper standard",
+  "Cons1 (Pb39 and Pb177)",
+  "Pseudathrobacter sp. Pb177",
+  "Streptomyces sp. Pb39"
+)
+
+# Fix cld_nbi — Gamma model returns response scale differently
+# Rerun get_cld with type="response" for NBI
+get_cld_response <- function(model, label) {
+  emm <- emmeans(model, ~ Treatment | Month, type = "response")
+  cld <- multcomp::cld(emm, adjust = "tukey",
+                        Letters = letters, alpha = 0.05) %>%
+    as.data.frame() %>%
+    mutate(
+      .group  = trimws(.group),
+      pigment = label,
+      Treatment = factor(Treatment, levels = trt_levels)
+    ) %>%
+    rename(
+      emmean   = response,
+      lower.CL = asymp.LCL,
+      upper.CL = asymp.UCL
+    )
+  return(cld)
+}
+
+get_cld_gaussian <- function(model, label) {
+  emm <- emmeans(model, ~ Treatment | Month)
+  cld <- multcomp::cld(emm, adjust = "tukey",
+                        Letters = letters, alpha = 0.05) %>%
+    as.data.frame() %>%
+    mutate(
+      .group  = trimws(.group),
+      pigment = label,
+      Treatment = factor(Treatment, levels = trt_levels)
+    ) %>%
+    rename(
+      lower.CL = asymp.LCL,
+      upper.CL = asymp.UCL
+    )
+  return(cld)
+}
+
+cld_chl  <- get_cld_gaussian(m_chl,  "Chlorophyll")
+cld_flav <- get_cld_gaussian(m_flav, "Flavonols")
+cld_anth <- get_cld_gaussian(m_anth, "Anthocyanins")
+cld_nbi  <- get_cld_response(m_nbi2, "NBI")
+
+# ============================================================
+# Plot function
+# ============================================================
+plot_pigment <- function(cld_data, y_label, y_breaks = NULL) {
+
+  p <- ggplot(cld_data,
+              aes(x = Month, y = emmean, fill = Treatment)) +
+
+    geom_col(position  = position_dodge(width = 0.9),
+             width     = 0.85,
+             color     = "black",
+             linewidth = 0.3) +
+
+    geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                  position  = position_dodge(width = 0.75),
+                  width     = 0.2,
+                  linewidth = 0.45) +
+
+    geom_text(aes(y     = upper.CL + max(upper.CL, na.rm=TRUE) * 0.03,
+                  label = .group,
+                  group = Treatment),
+              position = position_dodge(width = 0.75),
+              size     = 3,
+              fontface = "bold") +
+
+    scale_fill_manual(values = trt_colors) +
+
+    scale_y_continuous(
+      breaks = y_breaks,
+      expand = expansion(mult = c(0, 0.15))
+    ) +
+
+    labs(x = "Month", y = y_label, fill = "Treatment") +
+
+    theme_bw() +
+    theme(
+      axis.text.x      = element_text(size = 14),
+      axis.text.y      = element_text(size = 14, face = "bold"),
+      axis.title       = element_text(size = 16),
+      legend.text      = element_text(size = 16, face = "italic"),
+      legend.title     = element_text(size = 16, face = "bold"),
+      legend.position  = "right",
+      panel.grid.minor = element_blank()
+    )
+
+  return(p)
+}
+
+# ============================================================
+# Build 4 panels
+# ============================================================
+p_chl  <- plot_pigment(cld_chl,  "Chlorophyll (SCI)",
+                        y_breaks = seq(0, 60, 10))
+
+p_flav <- plot_pigment(cld_flav, "Flavonols (SCI)",
+                        y_breaks = seq(0, 2.5, 0.5))
+
+p_anth <- plot_pigment(cld_anth, "Anthocyanins (SCI)",
+                        y_breaks = seq(0, 0.25, 0.05))
+
+p_nbi  <- plot_pigment(cld_nbi,  "Nitrogen Balanced Index",
+                        y_breaks = seq(0, 40, 10))
+
+p_chl  <- plot_pigment(cld_chl,  "Chlorophyll index",   y_breaks = seq(0, 60, 10))
+p_flav <- plot_pigment(cld_flav, "Flavonol index",      y_breaks = seq(0, 2.5, 0.5))
+p_anth <- plot_pigment(cld_anth, "Anthocyanin index",   y_breaks = seq(0, 0.25, 0.05))
+p_nbi  <- plot_pigment(cld_nbi,  "Nitrogen Balance Index", y_breaks = seq(0, 40, 10))
+
+
+
+
+# ============================================================
+# Combine with shared legend
+# ============================================================
+combined <- (p_chl + p_flav) / (p_anth + p_nbi) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+  
+  ) &
+  theme(
+    legend.position  = "right",
+    plot.caption     = element_text(size = 12, color = "gray40")
+  )
+
+combined
+
+# Save
+ggsave(
+  filename    = "Pigments_2x2_panel.tiff",
+  plot        = combined,
+  path        = "~/Ad_Planta_Trials/Outputfiles/Field output files",
+  width       = 14,
+  height      = 10,
+  dpi         = 300,
+  units       = "in",
+  device      = "tiff",
+  compression = "lzw"
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
